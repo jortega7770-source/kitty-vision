@@ -1,3 +1,4 @@
+-- ORONA V78: Zombie / Servant ESP for killer NPC helpers; preserves all V77 features.
 -- ORONA V77: Slower smoother Moonwalk A/D body turns; V76 ESP and parry preserved.
 -- ORONA V76: Stable all-map objective ESP; expanded weapon/parry detection.
 -- Orona V73: Vault ESP anchored strictly to Window.Bottom; VaultTrigger used only for validation.
@@ -48,7 +49,7 @@ local Me = Players.LocalPlayer
 local PG = Me:WaitForChild("PlayerGui")
 local RNG = Random.new()
 local enabled, menuOpen, unloaded = true, true, false
-local S = {Players=false, Kitties=false, Hooks=false, Generators=false,
+local S = {Players=false, Servants=false, Kitties=false, Hooks=false, Generators=false,
 Pallets=false, Vaults=false, ExitGates=false, Traps=false, Pumpkins=false, AutoGen=false, Rain=false,
 Streamer=false, Moonwalk=false, Aimlock=false, GunAimlock=false, AutoParry=false}
 local C = {
@@ -572,6 +573,172 @@ record.tag:Destroy()
 record.tag=nil
 end
 end
+-- V78: independent zombie / servant ESP for non-player killer helpers.
+-- Explicit model names, CollectionService tags, or replicated attributes qualify;
+-- never guess whether a real Player character is a zombie.
+do
+    H.servantESP={markers={},scanToken=0,MAX=35,checkClock=0}
+    local esp=H.servantESP
+    local names={'zombie','servant','minion','thrall','undead','ghoul',
+        'summon','puppet','killerhelper','killer_helper'}
+    local tags={'Zombie','Servant','KillerServant','KillerMinion',
+        'SummonedMinion','Undead','KillerHelper'}
+    local function hasName(s)
+        if type(s)~='string' then return false end
+        local name=s:lower()
+        for _,word in ipairs(names) do
+            if name:find(word,1,true) then return true end
+        end
+        return false
+    end
+    local function candidate(model)
+        if not model or not model:IsA('Model') or not model:IsDescendantOf(workspace) then return false end
+        if Players:GetPlayerFromCharacter(model) or model==Me.Character then return false end
+        local node=model.Parent
+        while node and node~=workspace do
+            if node==Me.Character then return false end
+            local lower=node.Name:lower()
+            if lower=='lobby' or lower=='fakecharacters' or
+                lower=='killerpreviewmodels' or lower=='preview' then return false end
+            node=node.Parent
+        end
+        local named=hasName(model.Name)
+        local folder=model.Parent
+        if folder and hasName(folder.Name) then named=true end
+        if not named then
+            for _,tag in ipairs(tags) do
+                if CollectionService:HasTag(model,tag) then named=true;break end
+            end
+        end
+        if not named then
+            for _,attribute in ipairs({'IsZombie','IsServant','IsMinion',
+                'KillerMinion','KillerServant','SummonedByKiller','IsSummon'}) do
+                if model:GetAttribute(attribute)==true then named=true;break end
+            end
+        end
+        if not named then
+            for _,attribute in ipairs({'EntityType','NPCType','UnitType','CreatureType','Role','Faction'}) do
+                if hasName(model:GetAttribute(attribute)) then named=true;break end
+            end
+        end
+        if not named then return false end
+        local humanoid=model:FindFirstChildOfClass('Humanoid')
+        if humanoid and humanoid.Health<=0 then return false end
+        if not humanoid and not model:FindFirstChildOfClass('AnimationController') then
+            return false
+        end
+        return true
+    end
+    local function erase(model)
+        local record=esp.markers[model]
+        if record then
+            if record.highlight then record.highlight:Destroy() end
+            if record.gui then record.gui:Destroy() end
+            esp.markers[model]=nil
+        end
+    end
+    function esp.clear()
+        esp.scanToken+=1
+        for model in pairs(esp.markers) do erase(model) end
+    end
+    function esp.track(model)
+        if unloaded or not S.Servants or not H.vaultRoundActive() then return end
+        if esp.markers[model] or not candidate(model) then return end
+        local count=0
+        for _ in pairs(esp.markers) do count+=1 end
+        if count>=esp.MAX then return end
+        local anchor=model:FindFirstChild('Head',true)
+            or model:FindFirstChild('HumanoidRootPart',true)
+            or model.PrimaryPart
+        if not anchor or not anchor:IsA('BasePart') then return end
+        local highlight=H.addHighlight(model,C.hot,C.lightEdge)
+        highlight.Name='OronaServantESP'
+        highlight.FillTransparency=.68
+        local gui=H.new('BillboardGui',{
+            Name='OronaServantTag',Adornee=anchor,
+            Size=UDim2.fromOffset(120,30),
+            StudsOffsetWorldSpace=Vector3.new(0,2.6,0),
+            AlwaysOnTop=true,MaxDistance=2000,LightInfluence=0,
+            Enabled=true
+        },anchor)
+        H.new('TextLabel',{
+            Size=UDim2.fromScale(1,1),BackgroundTransparency=1,
+            Text=hasName(model.Name) and ('♡ '..model.Name..' ♡') or '♡ SERVANT ♡',
+            TextColor3=C.hot,TextStrokeColor3=C.black,
+            TextStrokeTransparency=.12,TextScaled=true,
+            Font=Enum.Font.GothamBold
+        },gui)
+        esp.markers[model]={highlight=highlight,gui=gui}
+    end
+    function esp.refresh()
+        if not S.Servants or unloaded or not H.vaultRoundActive() then return end
+        esp.scanToken+=1
+        local token=esp.scanToken
+        task.spawn(function()
+            -- Scan once per enable / match start, in small yielding batches.
+            -- Thereafter DescendantAdded and tagged signals handle new helpers.
+            local roots={}
+            local map=workspace:FindFirstChild('Map')
+            if map then roots[#roots+1]=map end
+            for _,child in ipairs(workspace:GetChildren()) do
+                if child~=map and (hasName(child.Name) or
+                    child.Name=='NPCs' or child.Name=='Enemies' or
+                    child.Name=='Entities' or child.Name=='Mobs') then
+                    roots[#roots+1]=child
+                end
+            end
+            local checked=0
+            for _,root in ipairs(roots) do
+                if token~=esp.scanToken or unloaded or not S.Servants then return end
+                if root:IsA('Model') then esp.track(root) end
+                for _,obj in ipairs(root:GetDescendants()) do
+                    if token~=esp.scanToken or unloaded or not S.Servants then return end
+                    if obj:IsA('Model') then esp.track(obj) end
+                    checked+=1
+                    if checked%300==0 then task.wait() end
+                end
+            end
+            for _,tag in ipairs(tags) do
+                for _,obj in ipairs(CollectionService:GetTagged(tag)) do
+                    if obj:IsA('Model') then esp.track(obj) end
+                end
+            end
+        end)
+    end
+    -- React to spawned helpers without scanning the map every frame.
+    H.con(workspace.DescendantAdded,function(obj)
+        if not S.Servants or unloaded or not H.vaultRoundActive() then return end
+        if obj:IsA('Humanoid') or obj:IsA('AnimationController') then
+            task.defer(function()
+                if obj.Parent then esp.track(obj.Parent) end
+            end)
+        elseif obj:IsA('Model') then
+            task.defer(function() esp.track(obj) end)
+        end
+    end)
+    H.con(workspace.DescendantRemoving,function(obj)
+        if esp.markers[obj] then erase(obj) end
+    end)
+    for _,tag in ipairs(tags) do
+        H.con(CollectionService:GetInstanceAddedSignal(tag),function(obj)
+            if obj:IsA('Model') then task.defer(function() esp.track(obj) end) end
+        end)
+    end
+    H.con(RS.Heartbeat,function(dt)
+        if unloaded or not S.Servants then return end
+        esp.checkClock+=math.min(dt,.1)
+        if esp.checkClock<.5 then return end
+        esp.checkClock=0
+        if not H.vaultRoundActive() then esp.clear();return end
+        for model in pairs(esp.markers) do
+            local hum=model:FindFirstChildOfClass('Humanoid')
+            if not model:IsDescendantOf(workspace) or (hum and hum.Health<=0) then
+                erase(model)
+            end
+        end
+    end)
+end
+
 function H.namedRoot(obj,word)
 local result=nil
 local cur=obj
@@ -2556,6 +2723,7 @@ end
 
 local function clearESP()
 for p in pairs(playerFX) do H.clearPlayer(p) end
+if H.servantESP then H.servantESP.clear() end
 local roots={}
 for root in pairs(objectFX) do roots[#roots+1]=root end
 for _,root in ipairs(roots) do removeObject(root) end
@@ -3997,7 +4165,7 @@ local reopenButton=H.new('TextButton',{
     BorderSizePixel=0,AutoButtonColor=true,Visible=false,ZIndex=25
 },gui)
 H.round(reopenButton,14);H.stroke(reopenButton,C.hot,2)
-local main=H.new("Frame",{Size=UDim2.fromOffset(355,735),
+local main=H.new("Frame",{Size=UDim2.fromOffset(355,768),
 AnchorPoint=Vector2.new(.5,.5),Position=UDim2.fromScale(.5,.5),BackgroundColor3=C.cream,
 BorderSizePixel=0,ZIndex=3},gui)
 H.round(main,22)
@@ -9444,7 +9612,7 @@ function H.fitMenuToScreen()
     if not camera then return end
     local v=camera.ViewportSize
     if v.X<100 or v.Y<100 then return end
-    local scale=math.min(1,(v.Y-32)/735,(v.X-32)/((sideOpen and (H.fullbodyImage and 1000 or 850) or 405) + (H.configOpen and 325 or 0)))
+    local scale=math.min(1,(v.Y-32)/768,(v.X-32)/((sideOpen and (H.fullbodyImage and 1000 or 850) or 405) + (H.configOpen and 325 or 0)))
     H.menuUIScale.Scale=math.clamp(scale,.55,1)
     if H.configOpen then
         local leftEdge=main.AbsolutePosition.X-335*H.menuUIScale.Scale
@@ -10521,7 +10689,7 @@ end
 local status=H.label(statusBar,"♡ Orona Effect Is Eeping ♡",14,C.dark,
 UDim2.fromOffset(60,8),UDim2.new(1,-67,0,45))
 status.ZIndex=8
-local panel=H.new("Frame",{Size=UDim2.new(1,-30,0,341),
+local panel=H.new("Frame",{Size=UDim2.new(1,-30,0,374),
 Position=UDim2.fromOffset(15,191),BackgroundColor3=C.white,
 BorderSizePixel=0,ZIndex=7},main)
 H.round(panel,17);H.stroke(panel,C.hot,1.8)
@@ -10652,6 +10820,8 @@ elseif key=='Rain' then
 rainLayer.Visible=value
 elseif key=='Players' or key=='Kitties' then
 for _,p in ipairs(Players:GetPlayers()) do H.updatePlayer(p) end
+elseif key=='Servants' then
+if value then H.servantESP.refresh() else H.servantESP.clear() end
 else
 toggleObjectiveCategory(key,value)
 end
@@ -10665,12 +10835,13 @@ H.optionSetters[key]=function(value)
 end
 end
 toggleRow(63,"♡ Player ESP","Players")
-toggleRow(96,"♡ Hook ESP","Hooks")
-toggleRow(129,"♡ Generator ESP","Generators")
-toggleRow(162,"♡ Pallet ESP","Pallets")
-toggleRow(195,"♡ Vault ESP","Vaults")
-toggleRow(228,"♡ Auto Skill Check","AutoGen")
-toggleRow(261,"♡ Moonwalk","Moonwalk")
+toggleRow(96,"✿ Zombie / Servant ESP","Servants")
+toggleRow(129,"♡ Hook ESP","Hooks")
+toggleRow(162,"♡ Generator ESP","Generators")
+toggleRow(195,"♡ Pallet ESP","Pallets")
+toggleRow(228,"♡ Vault ESP","Vaults")
+toggleRow(261,"♡ Auto Skill Check","AutoGen")
+toggleRow(294,"♡ Moonwalk","Moonwalk")
 -- Bonus utilities live in the separate panel, not in the main menu.
 -- Decorated separate tab sections, preserving true toggle callbacks.
 H.extrasHeader=H.label(sidePanel,'-  EXTRA EFFECTS  -',13,C.dark,
@@ -10698,7 +10869,7 @@ toggleRow(430,"♡ Gun Aimlock","GunAimlock",sidePanel)
 -- Choose moonwalk key without editing the script.
 -- Choose moonwalk key without editing the script.
 local bindRow=H.new('Frame',{
-    Size=UDim2.new(1,-30,0,31),Position=UDim2.fromOffset(15,294),
+    Size=UDim2.new(1,-30,0,31),Position=UDim2.fromOffset(15,327),
     BackgroundColor3=C.cream,BorderSizePixel=0,ZIndex=8
 },panel)
 H.round(bindRow,10)
@@ -10788,7 +10959,7 @@ function H.stopFovOverride()
     end
 end
 H.fovPanel=H.new("Frame",{
-Size=UDim2.new(1,-30,0,62),Position=UDim2.fromOffset(15,543),
+Size=UDim2.new(1,-30,0,62),Position=UDim2.fromOffset(15,576),
 BackgroundColor3=C.white,BorderSizePixel=0,ZIndex=7
 },main)
 H.round(H.fovPanel,15);H.stroke(H.fovPanel,C.hot,1.7)
@@ -10882,7 +11053,7 @@ end)
 H.connectFovCamera()
 H.updateFovVisual()
 H.unloadButton=H.new("TextButton",{Size=UDim2.new(1,-30,0,43),
-Position=UDim2.fromOffset(15,619),BackgroundColor3=C.soft,
+Position=UDim2.fromOffset(15,652),BackgroundColor3=C.soft,
 Text="♡ CLAWS UP ♡",TextColor3=C.dark,TextSize=15,
 Font=Enum.Font.GothamBold,AutoButtonColor=false,ZIndex=8},main)
 H.round(H.unloadButton,14);H.stroke(H.unloadButton,C.hot,2)
@@ -10899,7 +11070,7 @@ H.con(H.unloadButton.MouseLeave,function()
 H.tween(H.unloadButton,{BackgroundColor3=C.soft,TextColor3=C.dark},.15)
 end)
 H.footer=H.new("Frame",{Size=UDim2.new(1,-30,0,32),
-Position=UDim2.fromOffset(15,681),BackgroundColor3=C.soft,
+Position=UDim2.fromOffset(15,714),BackgroundColor3=C.soft,
 BorderSizePixel=0,ZIndex=7},main)
 H.round(H.footer,11)
 H.stroke(H.footer,C.white,.8)
@@ -12752,6 +12923,7 @@ H.con(RS.Heartbeat,function(dt)
                 if S.Players or S.Kitties then
                     for _,p in ipairs(Players:GetPlayers()) do H.updatePlayer(p) end
                 end
+                if S.Servants then H.servantESP.refresh() end
             end
         end
     end
