@@ -1,3 +1,4 @@
+-- ORONA V77: Slower smoother Moonwalk A/D body turns; V76 ESP and parry preserved.
 -- ORONA V76: Stable all-map objective ESP; expanded weapon/parry detection.
 -- Orona V73: Vault ESP anchored strictly to Window.Bottom; VaultTrigger used only for validation.
 -- KITTY VISION ORONA V68 | V4 Moonwalk: camera-relative backward movement, 36 degree body turn / 65% side, flashlight-safe follow
@@ -2957,9 +2958,11 @@ local moonHeld=false
 local aimHeld=false
 local moonHum=nil
 H.mw={
-    aTime=.055, gapA=.005, dTime=.055, gapD=.005,
+    -- Slower, more readable A/D rhythm; 20ms neutral interval between turns.
+    aTime=.085, gapA=.020, dTime=.085, gapD=.020,
     bodyTurnDegrees=36, sideWeight=.65, backwardWeight=1,
-    turnResponse=55, cameraFollow=true, cameraFollowResponse=17,
+    -- Easier body rotation without changing camera-follow responsiveness.
+    turnResponse=24, cameraFollow=true, cameraFollowResponse=17,
     renderName='OronaMoonwalkV67',
     token=0, baseFacing=nil, lastCameraYaw=nil,
     cameraYawOffset=nil, aimWasDrivingCamera=false, startedAt=0,
@@ -3938,7 +3941,7 @@ function H.mwUpdate(dt)
     if phase<H.mw.aTime then pulse=-1
     elseif phase>=H.mw.aTime+H.mw.gapA and
         phase<H.mw.aTime+H.mw.gapA+H.mw.dTime then pulse=1 end
-    -- V4 whole-body 36-degree turns on the original 55ms A/D cadence.
+    -- V77: 36-degree turns ease over a slower 85ms A/D cadence with 20ms gaps.
     local anchor=CFrame.lookAt(Vector3.zero,H.mw.baseFacing)
     local targetForward=(anchor*CFrame.Angles(0,-pulse*math.rad(H.mw.bodyTurnDegrees),0)).LookVector
     local target=CFrame.lookAt(root.Position,root.Position+targetForward)
