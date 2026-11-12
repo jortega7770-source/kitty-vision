@@ -1,6 +1,11 @@
--- ORONA V78: Zombie / Servant ESP for killer NPC helpers; preserves all V77 features.
--- ORONA V77: Slower smoother Moonwalk A/D body turns; V76 ESP and parry preserved.
--- ORONA V76: Stable all-map objective ESP; expanded weapon/parry detection.
+-- ORONA V78: Original integrated Streamer toggle now temporarily hides EVERY
+-- Orona ESP layer and private HUD/chat/name elements, restores settings on exit.
+-- Right Ctrl toggles Streamer Mode; Right Shift continues to open the menu.
+-- V78 standing-pallet repair recognizes NewPallet / case-variant active branches
+-- on maps where the original Intact-first selection missed upright geometry.
+-- ORONA V77: Standing-pallet repair, Player ESP includes Zombie / Servant NPCs,
+-- and background-aware Heartbeat skill-check loop with focus-safe input routing.
+-- Previous V76 weapon/parry, menu and all existing gameplay features are preserved.
 -- Orona V73: Vault ESP anchored strictly to Window.Bottom; VaultTrigger used only for validation.
 -- KITTY VISION ORONA V68 | V4 Moonwalk: camera-relative backward movement, 36 degree body turn / 65% side, flashlight-safe follow
 -- V63: Restore V60-style model-shaped Highlight on visible Intact pallet geometry.
@@ -49,7 +54,7 @@ local Me = Players.LocalPlayer
 local PG = Me:WaitForChild("PlayerGui")
 local RNG = Random.new()
 local enabled, menuOpen, unloaded = true, true, false
-local S = {Players=false, Servants=false, Kitties=false, Hooks=false, Generators=false,
+local S = {Players=false, Kitties=false, Hooks=false, Generators=false,
 Pallets=false, Vaults=false, ExitGates=false, Traps=false, Pumpkins=false, AutoGen=false, Rain=false,
 Streamer=false, Moonwalk=false, Aimlock=false, GunAimlock=false, AutoParry=false}
 local C = {
@@ -87,6 +92,7 @@ local skillCheck, needle, goal = nil,nil,nil
 local autoFired = false
 local previousSkillAngle = nil
 local lastAutoFailure = false
+local robloxHasFocus = true
 local env = (type(getgenv)=="function" and getgenv()) or _G
 -- Unload the earlier Orona version before binding any new controls.
 -- A previous Moonwalk could have left a Humanoid with AutoRotate disabled.
@@ -119,6 +125,8 @@ local c = signal:Connect(fn)
 table.insert(connections,c)
 return c
 end
+H.con(UIS.WindowFocused,function() robloxHasFocus=true end)
+H.con(UIS.WindowFocusReleased,function() robloxHasFocus=false end)
 function H.round(o,r) H.new("UICorner",{CornerRadius=UDim.new(0,r)},o) end
 function H.stroke(o,color,w)
 return H.new("UIStroke",{Color=color,Thickness=w or 2},o)
@@ -500,7 +508,7 @@ playerFX[p]=nil
 end
 end
 function H.updatePlayer(p)
-if unloaded or p==Me then return end
+if unloaded or p==Me or S.Streamer then return end
 if not H.vaultRoundActive() then
     H.clearPlayer(p)
     return
@@ -573,172 +581,127 @@ record.tag:Destroy()
 record.tag=nil
 end
 end
--- V78: independent zombie / servant ESP for non-player killer helpers.
--- Explicit model names, CollectionService tags, or replicated attributes qualify;
--- never guess whether a real Player character is a zombie.
-do
-    H.servantESP={markers={},scanToken=0,MAX=35,checkClock=0}
-    local esp=H.servantESP
-    local names={'zombie','servant','minion','thrall','undead','ghoul',
-        'summon','puppet','killerhelper','killer_helper'}
-    local tags={'Zombie','Servant','KillerServant','KillerMinion',
-        'SummonedMinion','Undead','KillerHelper'}
-    local function hasName(s)
-        if type(s)~='string' then return false end
-        local name=s:lower()
-        for _,word in ipairs(names) do
-            if name:find(word,1,true) then return true end
-        end
-        return false
-    end
-    local function candidate(model)
-        if not model or not model:IsA('Model') or not model:IsDescendantOf(workspace) then return false end
-        if Players:GetPlayerFromCharacter(model) or model==Me.Character then return false end
-        local node=model.Parent
-        while node and node~=workspace do
-            if node==Me.Character then return false end
-            local lower=node.Name:lower()
-            if lower=='lobby' or lower=='fakecharacters' or
-                lower=='killerpreviewmodels' or lower=='preview' then return false end
-            node=node.Parent
-        end
-        local named=hasName(model.Name)
-        local folder=model.Parent
-        if folder and hasName(folder.Name) then named=true end
-        if not named then
-            for _,tag in ipairs(tags) do
-                if CollectionService:HasTag(model,tag) then named=true;break end
-            end
-        end
-        if not named then
-            for _,attribute in ipairs({'IsZombie','IsServant','IsMinion',
-                'KillerMinion','KillerServant','SummonedByKiller','IsSummon'}) do
-                if model:GetAttribute(attribute)==true then named=true;break end
-            end
-        end
-        if not named then
-            for _,attribute in ipairs({'EntityType','NPCType','UnitType','CreatureType','Role','Faction'}) do
-                if hasName(model:GetAttribute(attribute)) then named=true;break end
-            end
-        end
-        if not named then return false end
-        local humanoid=model:FindFirstChildOfClass('Humanoid')
-        if humanoid and humanoid.Health<=0 then return false end
-        if not humanoid and not model:FindFirstChildOfClass('AnimationController') then
-            return false
-        end
-        return true
-    end
-    local function erase(model)
-        local record=esp.markers[model]
-        if record then
-            if record.highlight then record.highlight:Destroy() end
-            if record.gui then record.gui:Destroy() end
-            esp.markers[model]=nil
-        end
-    end
-    function esp.clear()
-        esp.scanToken+=1
-        for model in pairs(esp.markers) do erase(model) end
-    end
-    function esp.track(model)
-        if unloaded or not S.Servants or not H.vaultRoundActive() then return end
-        if esp.markers[model] or not candidate(model) then return end
-        local count=0
-        for _ in pairs(esp.markers) do count+=1 end
-        if count>=esp.MAX then return end
-        local anchor=model:FindFirstChild('Head',true)
-            or model:FindFirstChild('HumanoidRootPart',true)
-            or model.PrimaryPart
-        if not anchor or not anchor:IsA('BasePart') then return end
-        local highlight=H.addHighlight(model,C.hot,C.lightEdge)
-        highlight.Name='OronaServantESP'
-        highlight.FillTransparency=.68
-        local gui=H.new('BillboardGui',{
-            Name='OronaServantTag',Adornee=anchor,
-            Size=UDim2.fromOffset(120,30),
-            StudsOffsetWorldSpace=Vector3.new(0,2.6,0),
-            AlwaysOnTop=true,MaxDistance=2000,LightInfluence=0,
-            Enabled=true
-        },anchor)
-        H.new('TextLabel',{
-            Size=UDim2.fromScale(1,1),BackgroundTransparency=1,
-            Text=hasName(model.Name) and ('♡ '..model.Name..' ♡') or '♡ SERVANT ♡',
-            TextColor3=C.hot,TextStrokeColor3=C.black,
-            TextStrokeTransparency=.12,TextScaled=true,
-            Font=Enum.Font.GothamBold
-        },gui)
-        esp.markers[model]={highlight=highlight,gui=gui}
-    end
-    function esp.refresh()
-        if not S.Servants or unloaded or not H.vaultRoundActive() then return end
-        esp.scanToken+=1
-        local token=esp.scanToken
-        task.spawn(function()
-            -- Scan once per enable / match start, in small yielding batches.
-            -- Thereafter DescendantAdded and tagged signals handle new helpers.
-            local roots={}
-            local map=workspace:FindFirstChild('Map')
-            if map then roots[#roots+1]=map end
-            for _,child in ipairs(workspace:GetChildren()) do
-                if child~=map and (hasName(child.Name) or
-                    child.Name=='NPCs' or child.Name=='Enemies' or
-                    child.Name=='Entities' or child.Name=='Mobs') then
-                    roots[#roots+1]=child
-                end
-            end
-            local checked=0
-            for _,root in ipairs(roots) do
-                if token~=esp.scanToken or unloaded or not S.Servants then return end
-                if root:IsA('Model') then esp.track(root) end
-                for _,obj in ipairs(root:GetDescendants()) do
-                    if token~=esp.scanToken or unloaded or not S.Servants then return end
-                    if obj:IsA('Model') then esp.track(obj) end
-                    checked+=1
-                    if checked%300==0 then task.wait() end
-                end
-            end
-            for _,tag in ipairs(tags) do
-                for _,obj in ipairs(CollectionService:GetTagged(tag)) do
-                    if obj:IsA('Model') then esp.track(obj) end
-                end
-            end
-        end)
-    end
-    -- React to spawned helpers without scanning the map every frame.
-    H.con(workspace.DescendantAdded,function(obj)
-        if not S.Servants or unloaded or not H.vaultRoundActive() then return end
-        if obj:IsA('Humanoid') or obj:IsA('AnimationController') then
+-- V77: Zombies and servants belong to the Player ESP switch. The NPC index
+-- runs once when enabled, is time-budgeted, and new models arrive via events.
+-- It never touches Roblox player models or scenery without a Humanoid.
+H.npcFX = {}
+H.npcCandidates = setmetatable({}, {__mode='k'})
+H.npcScanToken = 0
+H.npcLimit = 42 -- preserve Roblox Highlight slots for pallets and objectives
+H.npcLastIndexAt = 0
+function H.npcClass(model)
+    if not model or not model:IsA('Model')
+        or not model:IsDescendantOf(workspace)
+        or Players:GetPlayerFromCharacter(model)
+        or model==Me.Character then return nil end
+    local n=model.Name:lower()
+    local role=model:GetAttribute('Role') or model:GetAttribute('NPCType')
+        or model:GetAttribute('Type') or model:GetAttribute('Faction')
+    if type(role)=='string' then role=role:lower() else role='' end
+    local par=model.Parent and model.Parent.Name:lower() or ''
+    local class=nil
+    if n:find('zombie',1,true) or role:find('zombie',1,true)
+        or CollectionService:HasTag(model,'Zombie')
+        or par=='zombies' or par=='zombie' then class='zombie'
+    elseif n:find('servant',1,true) or role:find('servant',1,true)
+        or CollectionService:HasTag(model,'Servant')
+        or par=='servants' or par=='servant' then class='servant' end
+    if not class then return nil end
+    local hum=model:FindFirstChildOfClass('Humanoid')
+    if not hum or hum.Health<=0 then return nil end
+    return class
+end
+function H.clearNPC(model)
+    local effect=H.npcFX[model]
+    if effect then effect:Destroy();H.npcFX[model]=nil end
+end
+function H.clearAllNPCs()
+    for model in pairs(H.npcFX) do H.clearNPC(model) end
+    H.npcCandidates=setmetatable({}, {__mode='k'})
+    H.npcScanToken+=1
+end
+function H.considerNPC(model)
+    if unloaded or S.Streamer or not S.Players or not H.vaultRoundActive() then return end
+    local class=H.npcClass(model)
+    if class then
+        H.npcCandidates[model]=class
+        if not H.npcRefreshQueued then
+            H.npcRefreshQueued=true
             task.defer(function()
-                if obj.Parent then esp.track(obj.Parent) end
+                H.npcRefreshQueued=false
+                if not unloaded then H.updateNPCs() end
             end)
-        elseif obj:IsA('Model') then
-            task.defer(function() esp.track(obj) end)
         end
-    end)
-    H.con(workspace.DescendantRemoving,function(obj)
-        if esp.markers[obj] then erase(obj) end
-    end)
-    for _,tag in ipairs(tags) do
-        H.con(CollectionService:GetInstanceAddedSignal(tag),function(obj)
-            if obj:IsA('Model') then task.defer(function() esp.track(obj) end) end
-        end)
     end
-    H.con(RS.Heartbeat,function(dt)
-        if unloaded or not S.Servants then return end
-        esp.checkClock+=math.min(dt,.1)
-        if esp.checkClock<.5 then return end
-        esp.checkClock=0
-        if not H.vaultRoundActive() then esp.clear();return end
-        for model in pairs(esp.markers) do
-            local hum=model:FindFirstChildOfClass('Humanoid')
-            if not model:IsDescendantOf(workspace) or (hum and hum.Health<=0) then
-                erase(model)
+end
+function H.updateNPCs()
+    if unloaded or S.Streamer or not S.Players or not H.vaultRoundActive() then
+        for model in pairs(H.npcFX) do H.clearNPC(model) end
+        return
+    end
+    local active=0
+    for model,effect in pairs(H.npcFX) do
+        local class=H.npcClass(model)
+        if not class or not effect.Parent or effect.Adornee~=model then
+            H.clearNPC(model)
+            if not class then H.npcCandidates[model]=nil end
+        else
+            active+=1
+            effect.Enabled=true
+        end
+    end
+    for model,class in pairs(H.npcCandidates) do
+        if active>=H.npcLimit then break end
+        if not H.npcFX[model] then
+            class=H.npcClass(model)
+            if class then
+                local color=class=='zombie' and C.killerPink or C.light
+                H.npcFX[model]=H.addHighlight(model,color,
+                    class=='zombie' and C.hot or C.lightEdge)
+                H.npcFX[model].Name='OronaPlayerNPCESP'
+                active+=1
+            else
+                H.npcCandidates[model]=nil
             end
         end
+    end
+end
+function H.indexNPCs()
+    if unloaded or S.Streamer or not S.Players or not H.vaultRoundActive() then return end
+    H.npcScanToken+=1
+    local token=H.npcScanToken
+    H.npcLastIndexAt=os.clock()
+    task.spawn(function()
+        local queue={workspace}
+        local head=1
+        while head<=#queue and not unloaded and S.Players
+            and token==H.npcScanToken do
+            local deadline=os.clock()+.0018
+            local count=0
+            while head<=#queue and count<170 and os.clock()<deadline do
+                local node=queue[head]
+                queue[head]=false
+                head+=1
+                count+=1
+                local isPlayerModel=node:IsA('Model')
+                    and Players:GetPlayerFromCharacter(node)~=nil
+                if not isPlayerModel then
+                    if node:IsA('Model') then H.considerNPC(node) end
+                    for _,child in ipairs(node:GetChildren()) do
+                        if child:IsA('Folder') or child:IsA('Model') then
+                            queue[#queue+1]=child
+                        end
+                    end
+                end
+            end
+            task.wait()
+        end
+        if token==H.npcScanToken then H.updateNPCs() end
     end)
 end
-
+function H.onPlayerESPToggled()
+    if S.Players then H.indexNPCs() else H.clearAllNPCs() end
+end
 function H.namedRoot(obj,word)
 local result=nil
 local cur=obj
@@ -872,10 +835,26 @@ function H.mapPalletRoot(obj)
     local map=workspace:FindFirstChild('Map')
     if not map or not obj or not obj:IsDescendantOf(map) then return nil end
     local resources=map:FindFirstChild('resources')
-    local folders={map:FindFirstChild('Pallets')}
-    if resources then folders[#folders+1]=resources:FindFirstChild('Pallets') end
+    local folders={map:FindFirstChild('Pallets') or map:FindFirstChild('pallets')}
+    if resources then folders[#folders+1]=resources:FindFirstChild('Pallets') or resources:FindFirstChild('pallets') end
     for _,folder in ipairs(folders) do
         if folder and obj:IsDescendantOf(folder) then
+            -- In some maps each upright pallet is nested below a set/area.
+            -- Prefer a real named model over an enclosing grouping model.
+            local direct=obj
+            local named=nil
+            while direct and direct~=folder do
+                if direct:IsA('Model') and H.anyPart(direct) then
+                    -- A prefab with an Intact child is the actual playable
+                    -- assembly, even when nested under a map decoration set.
+                    if direct:FindFirstChild('Intact') then return direct end
+                    if not named and H.palletModelName(direct.Name) then
+                        named=direct
+                    end
+                end
+                direct=direct.Parent
+            end
+            if named then return named end
             local cur=obj
             while cur and cur~=folder do
                 if cur.Parent==folder and H.physical(cur) and H.anyPart(cur) then
@@ -902,13 +881,23 @@ function H.getPalletModel(obj)
     if folderRoot then return folderRoot end
     local cur=obj
     local nearest=nil
+    local preferredAssembly=nil
     local partCandidate=nil
     while cur and cur~=workspace do
         local n=cur.Name:lower()
         if cur:IsA('Model') and n:find('pallet',1,true) then
             if H.palletModelName(cur.Name) and H.anyPart(cur) then
                 nearest=nearest or cur
-            elseif (n=='palletwrong' or n:find('palletwrong',1,true))
+                -- Prefer the gameplay assembly (NewPallet, Pallet, etc.),
+                -- not an inner cosmetic/standing submodel with a similar name.
+                for _,branchName in ipairs({'Intact','Standing','Upright',
+                    'Undropped','Unfallen','PalletStanding','Dropped'}) do
+                    if cur:FindFirstChild(branchName) then
+                        preferredAssembly=cur
+                        break
+                    end
+                end
+            elseif (n=='palletwrong'  or n:find('palletwrong',1,true))
                 and H.anyPart(cur) and H.palletPromptActive(cur) then
                 -- Palletwrong is usually scenery, but a REAL enabled drop
                 -- prompt can take precedence over that misleading name.
@@ -924,7 +913,25 @@ function H.getPalletModel(obj)
         end
         cur=cur.Parent
     end
+    if preferredAssembly then return preferredAssembly end
     if nearest then return nearest end
+    -- A map variant has named upper models but the standing prefab can be
+    -- called "Barricade" and identified by Intact + a pallet/state parent.
+    local ancestor=obj
+    while ancestor and ancestor~=workspace do
+        if ancestor:IsA('Model') and ancestor:FindFirstChild('Intact')
+            and H.anyPart(ancestor) then
+            local parent=ancestor.Parent
+            local par=parent and parent.Name:lower() or ''
+            local attrs=ancestor:GetAttribute('PalletState')~=nil
+                or ancestor:GetAttribute('CanDrop')~=nil
+                or ancestor:GetAttribute('IsPallet')==true
+            if attrs or par:find('pallet',1,true) then
+                return ancestor
+            end
+        end
+        ancestor=ancestor.Parent
+    end
     if partCandidate and (H.palletPromptActive(partCandidate)
         or partCandidate:GetAttribute('PalletState')~=nil
         or partCandidate:GetAttribute('CanDrop')~=nil) then
@@ -944,11 +951,23 @@ function H.palletGameplayEvidence(root)
     if H.palletEverValid[root] then return true end
     local now=os.clock()
     local cached=H.palletEvidenceCache[root]
-    if cached and now-cached.at<4 then return cached.valid end
+    -- Negative evidence expires quickly: StreamingEnabled may add a standing
+    -- branch after the initial map scan without recreating the root model.
+    if cached and now-cached.at<(cached.valid and 4 or .7) then return cached.valid end
     local valid=H.hasObjectiveTag and H.hasObjectiveTag(root,'Pallets') or false
     -- A direct model inside Map.Pallets is authoritative map grouping,
     -- unlike incidental props called "Pallet" elsewhere.
     if not valid and H.mapPalletRoot(root)==root then valid=true end
+    -- Intact at spawn is positive evidence (not the Broken dormant variant).
+    -- This helps maps whose standing pieces use a differently named container.
+    if not valid and root:IsA('Model') and (
+        root:FindFirstChild('Intact') or root:FindFirstChild('Standing')
+        or root:FindFirstChild('Upright') or root:FindFirstChild('Undropped')
+        or root:FindFirstChild('Unfallen') or root:FindFirstChild('PalletStanding'))
+        and (H.palletModelName(root.Name)
+            or (root.Parent and root.Parent.Name:lower():find('pallet',1,true))) then
+        valid=true
+    end
     if not valid then
         for _,key in ipairs({'CanDrop','CanBeDropped','Droppable','IsPallet',
             'PalletState','CanVaultPallet','PalletUsable','CanPullDown',
@@ -963,6 +982,7 @@ function H.palletGameplayEvidence(root)
         -- geometry fallback; a WoodenPallet or pallet pile never qualifies.
         local n=root.Name:lower():gsub('[%s_%-]','')
         local known=n=='pallet' or n:match('^pallet[%w]*$')~=nil
+            or n:match('^newpallet[%w]*$')~=nil
             or n:match('^standingpallet%d*$')~=nil
             or n:match('^droppablepallet%d*$')~=nil
         if known then
@@ -994,9 +1014,79 @@ function H.palletGameplayEvidence(root)
     return valid
 end
 
--- Pallets are still useful ESP targets after being dropped.  Do not mistake
--- Used/Dropped/Fallen/Standing=false for DESTRUCTION.  Only break/remove
--- evidence, missing geometry, or leaving Workspace should clear the outline.
+-- V77: Certain maps store upright geometry in Standing/Upright instead of
+-- Intact. Test active visual branches, never the dormant Broken branch.
+function H.palletLiveTarget(root)
+    if not root or not root:IsA('Model') then return root end
+    -- Some map variants put the *standing* geometry outside Intact. Looking
+    -- at Intact first made those maps show nothing until the pallet dropped.
+    local function visible(group)
+        if group:IsA('BasePart') then
+            return group.Transparency<.98 and group.Size.Magnitude>.18
+        end
+        for _,part in ipairs(group:GetDescendants()) do
+            if part:IsA('BasePart') and part.Transparency<.98
+                and part.Size.Magnitude>.18 then return true end
+        end
+        return false
+    end
+    local standingNames={
+        standing=true,upright=true,undropped=true,unfallen=true,
+        palletstanding=true,standingpallet=true,newpallet=true,
+        ready=true,unbroken=true,unused=true
+    }
+    local intact=nil
+    for _,branch in ipairs(root:GetChildren()) do
+        local key=branch.Name:lower():gsub('[%s_%-]','')
+        if (branch:IsA('Model') or branch:IsA('BasePart'))
+            and standingNames[key] and visible(branch) then
+            return branch
+        end
+        if key=='intact' then intact=branch end
+    end
+    -- Don't let the dropped Intact template override actual upright planks.
+    -- A valid root with active direct geometry is outlined as one assembly.
+    local directVisible=false
+    for _,child in ipairs(root:GetChildren()) do
+        if child:IsA('BasePart') then
+            local name=child.Name:lower()
+            if child.Transparency<.98 and child.Size.Magnitude>.18
+                and not name:find('trigger',1,true)
+                and not name:find('hitbox',1,true)
+                and not name:find('collision',1,true) then
+                directVisible=true
+                break
+            end
+        end
+    end
+    if directVisible then return root end
+    if intact and (intact:IsA('Model') or intact:IsA('BasePart'))
+        and visible(intact) then return intact end
+    -- Other prefabs store standing planks in unnamed nested models.
+    -- Ignore dormant Broken templates, decorative parts and hitboxes.
+    for _,part in ipairs(root:GetDescendants()) do
+        if part:IsA('BasePart') and part.Transparency<.98
+            and part.Size.Magnitude>.18 then
+            local cur=part
+            local excluded=false
+            while cur and cur~=root do
+                local name=cur.Name:lower()
+                if name=='broken' or name=='destroyed' or name=='debris'
+                    or name:find('hitbox',1,true)
+                    or name:find('trigger',1,true)
+                    or name:find('collision',1,true) then
+                    excluded=true
+                    break
+                end
+                cur=cur.Parent
+            end
+            if not excluded then return root end
+        end
+    end
+    return nil
+end
+-- Pallets are useful ESP targets while upright or after dropping, but never
+-- once destroyed. Invisible dormant Broken prefab is not a break indication.
 function H.palletDestroyed(inst)
     if not inst or not inst.Parent then return true end
     local map=workspace:FindFirstChild('Map')
@@ -1024,32 +1114,17 @@ function H.palletDestroyed(inst)
         return true
     end
     if not inst:IsA('Model') then return false end
-    local intact=inst:FindFirstChild('Intact')
-    local function visibleMesh(group)
-        for _,part in ipairs(group:GetDescendants()) do
-            if part:IsA('BasePart') and part.Transparency<.98
-                and part.Size.Magnitude>.18 then return true end
-        end
-        return false
-    end
-    if intact and intact:IsA('Model') then
-        -- Newpallet contains BOTH Broken and Intact at spawn. Broken is a
-        -- dormant visual variant, NOT proof the killer already broke it.
-        return not visibleMesh(intact)
-    end
-    -- Legacy pallets don't have Intact/Broken submodels.
-    for _,part in ipairs(inst:GetDescendants()) do
-        if part:IsA('BasePart') and part.Transparency<.98
-            and part.Size.Magnitude>.18
-            and not part.Name:lower():find('hitbox',1,true) then return false end
-    end
-    return true
+    -- On a streaming map, Intact may initially be invisible even though the
+    -- active Standing model is visible. Evaluate all playable visual branches.
+    return H.palletLiveTarget(inst)==nil
 end
 
 function H.trackablePallet(o)
     if not o or not H.physical(o)
         or not (H.palletModelName(o.Name) or palletPromptRoots[o]
-            or H.mapPalletRoot(o)==o)
+            or H.mapPalletRoot(o)==o
+            or (o:IsA('Model') and o:FindFirstChild('Intact')
+                and o.Parent and o.Parent.Name:lower():find('pallet',1,true)))
         or not H.anyPart(o) then return false end
     if H.palletDestroyed(o) then return false end
     if o:IsA('Model') and o.PrimaryPart and H.palletDestroyed(o.PrimaryPart) then
@@ -1261,7 +1336,7 @@ end
 -- Select the closest intact objects and reuse a model Highlight. Only the
 -- playable Intact geometry is adorned; the dormant Broken variant is excluded.
 local function updatePallets()
-    if unloaded or not S.Pallets or not H.vaultRoundActive() then
+    if unloaded or S.Streamer or not S.Pallets or not H.vaultRoundActive() then
         setPalletPoolVisible(false)
         return
     end
@@ -1277,9 +1352,8 @@ local function updatePallets()
             palletPromptRoots[root]=nil
             removePalletMarker(root)
         elseif H.trackablePallet(root) then
-            local intact=root:IsA('Model') and root:FindFirstChild('Intact')
-            local target=(intact and intact:IsA('Model')) and intact or root
-            local anchor=H.anyPart(target)
+            local target=H.palletLiveTarget(root)
+            local anchor=target and H.anyPart(target)
             -- Never highlight a broken pallet: state and visible Intact geometry
             -- are tested by trackablePallet/palletDestroyed before this point.
             if anchor then
@@ -1303,6 +1377,10 @@ local function updatePallets()
         if record.aura and record.aura.Parent and record.aura.Enabled then
             otherCount+=1
         end
+    end
+    -- Count zombie/servant Highlights in the same headroom calculation.
+    for _,effect in pairs(H.npcFX) do
+        if effect.Parent and effect.Enabled then otherCount+=1 end
     end
     local maxShown=math.min(MAX_VISIBLE_PALLETS,math.max(0,225-otherCount))
     local chosen={}
@@ -1768,7 +1846,7 @@ end
 function H.updateVaults()
     local state=H.vaultState
     local map=workspace:FindFirstChild('Map')
-    if unloaded or not S.Vaults or not map or not H.vaultRoundActive() then
+    if unloaded or S.Streamer or not S.Vaults or not map or not H.vaultRoundActive() then
         for root,effect in pairs(state.highlights) do
             if effect then effect.Enabled=false end
             local outline=state.outlines and state.outlines[root]
@@ -2113,7 +2191,7 @@ function H.removeGate(root)
     if st.indicators[root] then st.indicators[root]:Destroy(); st.indicators[root]=nil end
 end
 function H.updateGates()
-    if unloaded or not S.ExitGates or not H.vaultRoundActive() then return end
+    if unloaded or S.Streamer or not S.ExitGates or not H.vaultRoundActive() then return end
     local st=H.gateState
     local allDone=H.gateUnlocked()
     local chosen={}
@@ -2279,7 +2357,7 @@ function H.removePumpkin(root)
 end
 function H.updatePumpkins()
     local state=H.pumpkinState
-    if not S.Pumpkins or unloaded or not H.vaultRoundActive() then return end
+    if S.Streamer or not S.Pumpkins or unloaded or not H.vaultRoundActive() then return end
     local char=Me.Character
     local rootPart=char and char:FindFirstChild('HumanoidRootPart')
     local camera=workspace.CurrentCamera
@@ -2464,7 +2542,7 @@ if (kind=='Generators' and generatorComplete(root))
     if objectFX[root] then removeObject(root) end
     return
 end
-if unloaded or not enabled or not S[kind] or not root or
+if unloaded or S.Streamer or not enabled or not S[kind] or not root or
 not H.vaultRoundActive() or not root:IsDescendantOf(workspace) then return end
 target=target or root
 if not H.physical(target) or not H.safeObjectiveTarget(root,target,kind) then
@@ -2490,7 +2568,7 @@ kindCount[kind]=(kindCount[kind] or 0)+1
 if kind=='Generators' then ensureGenBar(root) end
 end
 local function inspect(o)
-    if unloaded or not H.vaultRoundActive() then return end
+    if unloaded or S.Streamer or not H.vaultRoundActive() then return end
     if o:IsA('ProximityPrompt') then
         H.inspectObjectivePrompt(o)
         if S.Pumpkins and H.pumpkinPrompt(o) then
@@ -2542,7 +2620,7 @@ local function inspect(o)
                 or (o.Parent.Parent and o.Parent.Parent.Name=='resources'
                     and o.Parent.Parent.Parent==workspace:FindFirstChild('Map'))))) then
         local root=H.getPalletModel(o)
-        if root and H.trackablePallet(root) then
+        if root and H.anyPart(root) then
             palletCandidates[root]=true
             H.palletRefreshRequested=true
         end
@@ -2578,7 +2656,7 @@ end
 -- V60 instantaneous candidate discovery from verified map folders.
 -- Called on toggle and deferred on new map objects; no whole-map walk.
 function H.fastIndexKnown()
-    if unloaded or not H.vaultRoundActive() then return end
+    if unloaded or S.Streamer or not H.vaultRoundActive() then return end
     local map=workspace:FindFirstChild('Map')
     if not map then return end
     local resources=map:FindFirstChild('resources')
@@ -2617,9 +2695,13 @@ function H.fastIndexKnown()
     if S.Pallets then
         local function pallet(child)
             if child:IsA('Model') and H.anyPart(child)
-                and not H.excludedObjectiveName(child.Name)
-                and H.trackablePallet(child) then
-                palletCandidates[child]=true
+                and not H.excludedObjectiveName(child.Name) then
+                local root=H.getPalletModel(child) or child
+                if H.palletModelName(root.Name)
+                    or H.mapPalletRoot(root)==root
+                    or H.trackablePallet(root) then
+                    palletCandidates[root]=true
+                end
             end
         end
         collect(map:FindFirstChild('Pallets'),pallet)
@@ -2667,7 +2749,7 @@ end
 H.globalObjectiveIndex={map=nil,token=0,running=false}
 function H.indexEntireMapOnce(force)
     local map=workspace:FindFirstChild('Map')
-    if not map or unloaded or not H.vaultRoundActive() then return end
+    if not map or unloaded or S.Streamer or not H.vaultRoundActive() then return end
     local index=H.globalObjectiveIndex
     if index.map==map and not force then return end
     index.map=map
@@ -2700,10 +2782,13 @@ function H.indexEntireMapOnce(force)
                             objectiveCandidates.Hooks[root]=true
                             if S.Hooks then mark(root,'Hooks',root) end
                         end
-                    elseif S.Pallets and (name=='newpallet' or name=='pallet'
-                        or (node.Parent and node.Parent.Name=='Pallets')) then
+                    elseif S.Pallets and (
+                        name:find('pallet',1,true)~=nil
+                        or name=='intact'
+                        or (node.Parent and node.Parent.Name:lower()=='pallets')
+                        or node:FindFirstChild('Intact')) then
                         local root=H.getPalletModel(node)
-                        if root then palletCandidates[root]=true end
+                        if root and H.anyPart(root) then palletCandidates[root]=true end
                     end
                 end
                 for _,child in ipairs(node:GetChildren()) do
@@ -2723,7 +2808,7 @@ end
 
 local function clearESP()
 for p in pairs(playerFX) do H.clearPlayer(p) end
-if H.servantESP then H.servantESP.clear() end
+H.clearAllNPCs()
 local roots={}
 for root in pairs(objectFX) do roots[#roots+1]=root end
 for _,root in ipairs(roots) do removeObject(root) end
@@ -2894,32 +2979,57 @@ local function sendSpace()
     if hadChat then
         pcall(function() focused:ReleaseFocus(false) end)
     end
+    -- In your own Roblox game, let the existing skill-check LocalScript
+    -- register this callback and use its normal success-validation path.
+    -- Unlike a keyboard injection this callback also works out of focus.
+    if type(env.__OronaSkillCheckActivate)=='function' then
+        local ok,didFire=pcall(env.__OronaSkillCheckActivate)
+        if ok and didFire~=false then
+            if hadChat then task.defer(restoreChat) end
+            return true
+        end
+    end
+    local event=PG:FindFirstChild('OronaSkillCheckAction')
+    if not event and H.repStorage then
+        event=H.repStorage:FindFirstChild('OronaSkillCheckAction')
+    end
+    if event and event:IsA('BindableEvent') then
+        local ok=pcall(function() event:Fire() end)
+        if ok then
+            if hadChat then task.defer(restoreChat) end
+            return true
+        end
+    end
     local pressed,release=false,nil
-    -- Send the keyboard event, not a chat message. In normal Studio client
-    -- LocalScripts both backends may be restricted, so never claim success.
-    if type(keypress)=='function' and type(keyrelease)=='function' then
+    -- When Roblox loses focus, OS-level keypress targets another app.
+    -- Prefer Roblox-directed VIM even in the background; only use a raw
+    -- system key event while Roblox is the focused window.
+    local function tryRobloxInput()
+        local ok,vim=pcall(function()
+            return game:GetService('VirtualInputManager')
+        end)
+        if not ok or not vim then return false end
+        local success=pcall(function()
+            vim:SendKeyEvent(true,Enum.KeyCode.Space,false,game)
+        end)
+        if success then
+            release=function()
+                pcall(function()
+                    vim:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
+                end)
+            end
+        end
+        return success
+    end
+    if not robloxHasFocus then pressed=tryRobloxInput() end
+    if not pressed and robloxHasFocus
+        and type(keypress)=='function' and type(keyrelease)=='function' then
         pressed=pcall(function() keypress(0x20) end)
         if pressed then
             release=function() pcall(function() keyrelease(0x20) end) end
         end
     end
-    if not pressed then
-        local ok,vim=pcall(function()
-            return game:GetService('VirtualInputManager')
-        end)
-        if ok and vim then
-            pressed=pcall(function()
-                vim:SendKeyEvent(true,Enum.KeyCode.Space,false,game)
-            end)
-            if pressed then
-                release=function()
-                    pcall(function()
-                        vim:SendKeyEvent(false,Enum.KeyCode.Space,false,game)
-                    end)
-                end
-            end
-        end
-    end
+    if not pressed and robloxHasFocus then pressed=tryRobloxInput() end
     if not pressed then
         if hadChat then task.defer(restoreChat) end
         return false
@@ -2938,6 +3048,7 @@ end
 local lastSkillPress=0
 local skillArmed=true
 local previousGoal=nil
+local lastSkillFrameAt=nil
 -- V48: detect trap context without affecting heal/generator timing.
 H.trapSkill={visibleSince=0,lastVisible=false,stableFrames=0,previousAngle=nil,
     trapLatched=false,observedOutside=false,movementFrames=0,lowAngle=false}
@@ -3021,6 +3132,7 @@ local prompt=skillCheck:FindFirstAncestorOfClass('ScreenGui')
 local visible=skillCheck.Visible and (not prompt or prompt.Enabled)
 if not visible then
 skillArmed=true; previousSkillAngle=nil; previousGoal=nil
+lastSkillFrameAt=nil
 H.trapSkill.lastVisible=false
 H.trapSkill.stableFrames=0
 H.trapSkill.previousAngle=nil
@@ -3035,6 +3147,8 @@ if role and H.contains(role.Name,'killer') then return end
 local angle=(needle.Rotation-goal.Rotation)%360
 local goalRot=goal.Rotation
 local now=os.clock()
+local sampleGap=lastSkillFrameAt and math.min(0.35,now-lastSkillFrameAt) or .016
+lastSkillFrameAt=now
 local trapState=H.trapSkill
 if not trapState.lastVisible then
     trapState.visibleSince=now
@@ -3056,7 +3170,7 @@ skillArmed=true
 end
 local crossed=previousSkillAngle~=nil
 and previousSkillAngle<109 and angle>=109
-and (angle-previousSkillAngle)<30
+and (angle-previousSkillAngle)<math.max(30,math.min(95,sampleGap*420))
 local center=angle>=106 and angle<=112
 previousSkillAngle=angle
 -- Trap checks can use a different visible needle motion. Never use the
@@ -3089,7 +3203,7 @@ and now-lastSkillPress>.14 then
 skillArmed=false
 lastSkillPress=now
 if not sendSpace() and not lastAutoFailure then
-warn('Orona Auto Skill Check: input injection unavailable here')
+warn('Orona Auto Skill Check: Roblox-directed input is unavailable; out-of-focus presses require a game-side skill-check event')
 lastAutoFailure=true
 end
 end
@@ -3099,6 +3213,7 @@ S.AutoGen=value
 autoFired=false
 previousSkillAngle=nil
 previousGoal=nil
+lastSkillFrameAt=nil
 skillArmed=true
 H.trapSkill.lastVisible=false
 H.trapSkill.stableFrames=0
@@ -3111,7 +3226,10 @@ lastAutoFailure=false
 if autoConnection then autoConnection:Disconnect(); autoConnection=nil end
 if value and not unloaded then
 skillCheck,needle,goal=findSkillCheck()
-autoConnection=RS.RenderStepped:Connect(autoFrame)
+-- Heartbeat continues to run when graphics rendering is not foreground.
+-- Roblox may still throttle a minimized client; background VIM support is
+-- executor/client-dependent, so this is best-effort rather than a guarantee.
+autoConnection=RS.Heartbeat:Connect(autoFrame)
 end
 end
 
@@ -3126,11 +3244,9 @@ local moonHeld=false
 local aimHeld=false
 local moonHum=nil
 H.mw={
-    -- Slower, more readable A/D rhythm; 20ms neutral interval between turns.
-    aTime=.085, gapA=.020, dTime=.085, gapD=.020,
+    aTime=.055, gapA=.005, dTime=.055, gapD=.005,
     bodyTurnDegrees=36, sideWeight=.65, backwardWeight=1,
-    -- Easier body rotation without changing camera-follow responsiveness.
-    turnResponse=24, cameraFollow=true, cameraFollowResponse=17,
+    turnResponse=55, cameraFollow=true, cameraFollowResponse=17,
     renderName='OronaMoonwalkV67',
     token=0, baseFacing=nil, lastCameraYaw=nil,
     cameraYawOffset=nil, aimWasDrivingCamera=false, startedAt=0,
@@ -4109,7 +4225,7 @@ function H.mwUpdate(dt)
     if phase<H.mw.aTime then pulse=-1
     elseif phase>=H.mw.aTime+H.mw.gapA and
         phase<H.mw.aTime+H.mw.gapA+H.mw.dTime then pulse=1 end
-    -- V77: 36-degree turns ease over a slower 85ms A/D cadence with 20ms gaps.
+    -- V4 whole-body 36-degree turns on the original 55ms A/D cadence.
     local anchor=CFrame.lookAt(Vector3.zero,H.mw.baseFacing)
     local targetForward=(anchor*CFrame.Angles(0,-pulse*math.rad(H.mw.bodyTurnDegrees),0)).LookVector
     local target=CFrame.lookAt(root.Position,root.Position+targetForward)
@@ -4165,7 +4281,7 @@ local reopenButton=H.new('TextButton',{
     BorderSizePixel=0,AutoButtonColor=true,Visible=false,ZIndex=25
 },gui)
 H.round(reopenButton,14);H.stroke(reopenButton,C.hot,2)
-local main=H.new("Frame",{Size=UDim2.fromOffset(355,768),
+local main=H.new("Frame",{Size=UDim2.fromOffset(355,735),
 AnchorPoint=Vector2.new(.5,.5),Position=UDim2.fromScale(.5,.5),BackgroundColor3=C.cream,
 BorderSizePixel=0,ZIndex=3},gui)
 H.round(main,22)
@@ -9612,7 +9728,7 @@ function H.fitMenuToScreen()
     if not camera then return end
     local v=camera.ViewportSize
     if v.X<100 or v.Y<100 then return end
-    local scale=math.min(1,(v.Y-32)/768,(v.X-32)/((sideOpen and (H.fullbodyImage and 1000 or 850) or 405) + (H.configOpen and 325 or 0)))
+    local scale=math.min(1,(v.Y-32)/735,(v.X-32)/((sideOpen and (H.fullbodyImage and 1000 or 850) or 405) + (H.configOpen and 325 or 0)))
     H.menuUIScale.Scale=math.clamp(scale,.55,1)
     if H.configOpen then
         local leftEdge=main.AbsolutePosition.X-335*H.menuUIScale.Scale
@@ -10689,7 +10805,7 @@ end
 local status=H.label(statusBar,"♡ Orona Effect Is Eeping ♡",14,C.dark,
 UDim2.fromOffset(60,8),UDim2.new(1,-67,0,45))
 status.ZIndex=8
-local panel=H.new("Frame",{Size=UDim2.new(1,-30,0,374),
+local panel=H.new("Frame",{Size=UDim2.new(1,-30,0,341),
 Position=UDim2.fromOffset(15,191),BackgroundColor3=C.white,
 BorderSizePixel=0,ZIndex=7},main)
 H.round(panel,17);H.stroke(panel,C.hot,1.8)
@@ -10758,6 +10874,130 @@ local bowJewel=H.new('Frame',{Position=UDim2.fromOffset(11,11),
 H.round(bowJewel,6)
 local updateStatus
 H.optionSetters={}
+-- Integrated Streamer Mode for THIS Orona version. Normal Discord/OBS
+-- capture sees the same rendered Roblox picture; hide ESP locally to
+-- remove it from the capture. User ESP preferences are never altered.
+local streamerSaved={core={},chat={},humanoids={},gui={}}
+local streamerCore=game:GetService('StarterGui')
+local streamerChat=game:GetService('TextChatService')
+function H.applyStreamerPrivateGui(o,hide)
+    if not o or o:GetAttribute('StreamerPrivate')~=true then return end
+    local prop=o:IsA('ScreenGui') and 'Enabled'
+        or (o:IsA('GuiObject') and 'Visible') or nil
+    if not prop then return end
+    if hide then
+        if streamerSaved.gui[o]==nil then streamerSaved.gui[o]=o[prop] end
+        o[prop]=false
+    elseif streamerSaved.gui[o]~=nil then
+        pcall(function() o[prop]=streamerSaved.gui[o] end)
+        streamerSaved.gui[o]=nil
+    end
+end
+function H.hideStreamerNames(char)
+    if not S.Streamer or not char then return end
+    local hum=char:FindFirstChildOfClass('Humanoid')
+        or char:WaitForChild('Humanoid',5)
+    if hum and S.Streamer and not unloaded then
+        if streamerSaved.humanoids[hum]==nil then
+            streamerSaved.humanoids[hum]=hum.DisplayDistanceType
+        end
+        pcall(function()
+            hum.DisplayDistanceType=Enum.HumanoidDisplayDistanceType.None
+        end)
+    end
+end
+function H.setStreamerPrivacy(hide)
+    for _,coreType in ipairs({Enum.CoreGuiType.Chat,
+        Enum.CoreGuiType.PlayerList}) do
+        if hide then
+            if streamerSaved.core[coreType]==nil then
+                local ok,prior=pcall(function()
+                    return streamerCore:GetCoreGuiEnabled(coreType)
+                end)
+                if ok then streamerSaved.core[coreType]=prior end
+            end
+            pcall(function() streamerCore:SetCoreGuiEnabled(coreType,false) end)
+        elseif streamerSaved.core[coreType]~=nil then
+            local prior=streamerSaved.core[coreType]
+            pcall(function() streamerCore:SetCoreGuiEnabled(coreType,prior) end)
+            streamerSaved.core[coreType]=nil
+        end
+    end
+    for _,name in ipairs({'ChatWindowConfiguration',
+        'ChatInputBarConfiguration','BubbleChatConfiguration'}) do
+        local config=streamerChat:FindFirstChild(name)
+        if config then
+            if hide then
+                if streamerSaved.chat[config]==nil then
+                    local ok,prior=pcall(function() return config.Enabled end)
+                    if ok then streamerSaved.chat[config]=prior end
+                end
+                pcall(function() config.Enabled=false end)
+            elseif streamerSaved.chat[config]~=nil then
+                local prior=streamerSaved.chat[config]
+                pcall(function() config.Enabled=prior end)
+                streamerSaved.chat[config]=nil
+            end
+        end
+    end
+    if hide then
+        for _,p in ipairs(Players:GetPlayers()) do
+            if p.Character then task.spawn(H.hideStreamerNames,p.Character) end
+        end
+        for _,o in ipairs(PG:GetDescendants()) do
+            H.applyStreamerPrivateGui(o,true)
+        end
+        for _,o in ipairs(PG:GetChildren()) do
+            H.applyStreamerPrivateGui(o,true)
+        end
+    else
+        for hum,prior in pairs(streamerSaved.humanoids) do
+            if hum.Parent then
+                pcall(function() hum.DisplayDistanceType=prior end)
+            end
+            streamerSaved.humanoids[hum]=nil
+        end
+        for o,prior in pairs(streamerSaved.gui) do
+            if o.Parent then
+                pcall(function()
+                    if o:IsA('ScreenGui') then o.Enabled=prior
+                    elseif o:IsA('GuiObject') then o.Visible=prior end
+                end)
+            end
+            streamerSaved.gui[o]=nil
+        end
+    end
+end
+H.con(PG.DescendantAdded,function(o)
+    if not unloaded and S.Streamer then
+        task.defer(function()
+            if o.Parent and S.Streamer then
+                H.applyStreamerPrivateGui(o,true)
+            end
+        end)
+    end
+end)
+local function setIntegratedStreamer(value)
+    H.setStreamerPrivacy(value)
+    if value then
+        -- Clearing just the presentation objects preserves ALL menu toggles,
+        -- config choices, aim/movement and skill-check functionality.
+        clearESP()
+    elseif H.vaultRoundActive() then
+        -- Recreate the current map's visuals without a per-frame map scan.
+        if H.fastIndexKnown then H.fastIndexKnown() end
+        if S.Pallets then discoverPallets() end
+        if S.Vaults then H.discoverVaults() end
+        if S.ExitGates then H.discoverGates() end
+        if S.Pumpkins then H.discoverPumpkins() end
+        if H.indexEntireMapOnce then H.indexEntireMapOnce(true) end
+        if S.Traps or S.Pumpkins then scan() end
+        if S.Players or S.Kitties then
+            for _,p in ipairs(Players:GetPlayers()) do H.updatePlayer(p) end
+            if S.Players then H.indexNPCs() end
+        end
+    end
+end
 local function toggleRow(y,name,key,place)
 local parent=place or panel
 local z=(parent==sidePanel) and 22 or 8
@@ -10810,18 +11050,12 @@ if not value then finishMoonwalk() end
 elseif key=='Aimlock' or key=='GunAimlock' then
 if not value then aimHeld=false;lockedHead=nil;H.gunLockedTorso=nil end
 elseif key=='Streamer' then
--- Keep EVERY local ESP visible.  Screen-capture exclusion cannot be
--- achieved by Roblox GUI code: OBS/Discord ordinarily capture the same
--- rendered image the local player sees.
-if value then
-    warn('[Orona V49] Streamer Mode keeps ESP visible locally. It cannot hide ESP from OBS/Discord capture using only a Roblox script.')
-end
+setIntegratedStreamer(value)
 elseif key=='Rain' then
 rainLayer.Visible=value
 elseif key=='Players' or key=='Kitties' then
 for _,p in ipairs(Players:GetPlayers()) do H.updatePlayer(p) end
-elseif key=='Servants' then
-if value then H.servantESP.refresh() else H.servantESP.clear() end
+if key=='Players' then H.onPlayerESPToggled() end
 else
 toggleObjectiveCategory(key,value)
 end
@@ -10835,13 +11069,12 @@ H.optionSetters[key]=function(value)
 end
 end
 toggleRow(63,"♡ Player ESP","Players")
-toggleRow(96,"✿ Zombie / Servant ESP","Servants")
-toggleRow(129,"♡ Hook ESP","Hooks")
-toggleRow(162,"♡ Generator ESP","Generators")
-toggleRow(195,"♡ Pallet ESP","Pallets")
-toggleRow(228,"♡ Vault ESP","Vaults")
-toggleRow(261,"♡ Auto Skill Check","AutoGen")
-toggleRow(294,"♡ Moonwalk","Moonwalk")
+toggleRow(96,"♡ Hook ESP","Hooks")
+toggleRow(129,"♡ Generator ESP","Generators")
+toggleRow(162,"♡ Pallet ESP","Pallets")
+toggleRow(195,"♡ Vault ESP","Vaults")
+toggleRow(228,"♡ Auto Skill Check","AutoGen")
+toggleRow(261,"♡ Moonwalk","Moonwalk")
 -- Bonus utilities live in the separate panel, not in the main menu.
 -- Decorated separate tab sections, preserving true toggle callbacks.
 H.extrasHeader=H.label(sidePanel,'-  EXTRA EFFECTS  -',13,C.dark,
@@ -10869,7 +11102,7 @@ toggleRow(430,"♡ Gun Aimlock","GunAimlock",sidePanel)
 -- Choose moonwalk key without editing the script.
 -- Choose moonwalk key without editing the script.
 local bindRow=H.new('Frame',{
-    Size=UDim2.new(1,-30,0,31),Position=UDim2.fromOffset(15,327),
+    Size=UDim2.new(1,-30,0,31),Position=UDim2.fromOffset(15,294),
     BackgroundColor3=C.cream,BorderSizePixel=0,ZIndex=8
 },panel)
 H.round(bindRow,10)
@@ -10959,7 +11192,7 @@ function H.stopFovOverride()
     end
 end
 H.fovPanel=H.new("Frame",{
-Size=UDim2.new(1,-30,0,62),Position=UDim2.fromOffset(15,576),
+Size=UDim2.new(1,-30,0,62),Position=UDim2.fromOffset(15,543),
 BackgroundColor3=C.white,BorderSizePixel=0,ZIndex=7
 },main)
 H.round(H.fovPanel,15);H.stroke(H.fovPanel,C.hot,1.7)
@@ -11053,7 +11286,7 @@ end)
 H.connectFovCamera()
 H.updateFovVisual()
 H.unloadButton=H.new("TextButton",{Size=UDim2.new(1,-30,0,43),
-Position=UDim2.fromOffset(15,652),BackgroundColor3=C.soft,
+Position=UDim2.fromOffset(15,619),BackgroundColor3=C.soft,
 Text="♡ CLAWS UP ♡",TextColor3=C.dark,TextSize=15,
 Font=Enum.Font.GothamBold,AutoButtonColor=false,ZIndex=8},main)
 H.round(H.unloadButton,14);H.stroke(H.unloadButton,C.hot,2)
@@ -11070,7 +11303,7 @@ H.con(H.unloadButton.MouseLeave,function()
 H.tween(H.unloadButton,{BackgroundColor3=C.soft,TextColor3=C.dark},.15)
 end)
 H.footer=H.new("Frame",{Size=UDim2.new(1,-30,0,32),
-Position=UDim2.fromOffset(15,714),BackgroundColor3=C.soft,
+Position=UDim2.fromOffset(15,681),BackgroundColor3=C.soft,
 BorderSizePixel=0,ZIndex=7},main)
 H.round(H.footer,11)
 H.stroke(H.footer,C.white,.8)
@@ -12681,6 +12914,10 @@ workspace.CurrentCamera.FieldOfView=H.startingFOV
 end
 setAutoGen(false)
 if H.parry then H.parry.setEnabled(false) end
+if S.Streamer then
+    S.Streamer=false
+    H.setStreamerPrivacy(false)
+end
 clearESP()
 for _,c in ipairs(connections) do c:Disconnect() end
 for _,c in pairs(playerConnections) do c:Disconnect() end
@@ -12732,6 +12969,12 @@ H.con(UIS.InputBegan,function(input,processed)
         end
         return
     end
+    if input.KeyCode==Enum.KeyCode.RightControl then
+        if not UIS:GetFocusedTextBox() and H.optionSetters.Streamer then
+            H.optionSetters.Streamer(not S.Streamer)
+        end
+        return
+    end
     if input.KeyCode==Enum.KeyCode.RightShift then
         requestMenuToggle() -- backup for experiences that consume CAS bindings
         return
@@ -12767,6 +13010,7 @@ H.con(UIS.WindowFocusReleased,finishMoonwalk)
 -- the old lobby snapshot must not trap the new round in a free cursor view.
 H.con(Me.CharacterAdded,function(char)
     if unloaded then return end
+    if S.Streamer then task.spawn(H.hideStreamerNames,char) end
     H.invalidateRoundCache()
     finishMoonwalk()
     lockedHead=nil
@@ -12801,8 +13045,10 @@ local function watchPlayer(p)
 if p==Me or playerConnections[p] then return end
 playerConnections[p]=p.CharacterAdded:Connect(function(char)
 char:WaitForChild("Head",10)
+if S.Streamer then task.spawn(H.hideStreamerNames,char) end
 if not unloaded and enabled then H.updatePlayer(p) end
 end)
+if S.Streamer and p.Character then task.spawn(H.hideStreamerNames,p.Character) end
 if enabled then H.updatePlayer(p) end
 end
 for _,p in ipairs(Players:GetPlayers()) do watchPlayer(p) end
@@ -12818,13 +13064,19 @@ end)
 -- A changed prompt does not require recomputing the entire map.
 H.con(workspace.DescendantAdded,function(o)
     if unloaded or not H.vaultRoundActive() then return end
+    if S.Players then
+        local model=o:IsA('Model') and o
+            or (o:IsA('Humanoid') and o.Parent and o.Parent:IsA('Model') and o.Parent)
+        if model then H.considerNPC(model) end
+    end
     if not (S.Hooks or S.Generators or S.Pallets or S.Vaults or S.ExitGates or S.Traps or S.Pumpkins) then return end
     if H.physical(o) or o:IsA('ProximityPrompt') then
         local map=workspace:FindFirstChild('Map')
         if (not map or o:IsDescendantOf(map)) and
             not (Me.Character and o:IsDescendantOf(Me.Character)) then
             local n=o.Name:lower()
-            local objectiveName=n:find('pallet',1,true)
+            local objectiveName=n:find('pallet',1,true) or n=='intact'
+                or n=='standingpallet' or n=='droppablepallet'
                 or n:find('hook',1,true) or n:find('generator',1,true)
                 or n:find('window',1,true) or n:find('vault',1,true)
                 or n:find('gate',1,true) or n:find('trap',1,true)
@@ -12841,8 +13093,9 @@ H.con(workspace.DescendantAdded,function(o)
                     end
                 end)
             end
-            if n=='window' or n=='newpallet' or n=='pallet' or
-                n=='generator' or n=='hook' or n=='gate' or n=='exitlever' then
+            if n=='window' or n=='newpallet' or n=='pallet' or n=='intact'
+                or n:find('pallet',1,true)
+                or n=='generator' or n=='hook' or n=='gate' or n=='exitlever' then
                 if not H.quickIndexQueued then
                     H.quickIndexQueued=true
                     task.defer(function()
@@ -12883,6 +13136,8 @@ for _,tag in ipairs({'ExitGate','VDExitGate','EscapeGate','ExitLever'}) do
     end)
 end
 H.con(workspace.DescendantRemoving,function(o)
+    if H.npcFX[o] then H.clearNPC(o) end
+    H.npcCandidates[o]=nil
     if objectFX[o] then removeObject(o) end
     if palletCandidates[o] then palletCandidates[o]=nil end
     H.palletEvidenceCache[o]=nil
@@ -12922,8 +13177,8 @@ H.con(RS.Heartbeat,function(dt)
                 if S.Traps or S.Pumpkins then scan() end
                 if S.Players or S.Kitties then
                     for _,p in ipairs(Players:GetPlayers()) do H.updatePlayer(p) end
+                    if S.Players then H.indexNPCs() end
                 end
-                if S.Servants then H.servantESP.refresh() end
             end
         end
     end
@@ -12956,6 +13211,7 @@ H.con(workspace.ChildAdded,function(child)
         if S.ExitGates then H.gateState.candidates={};H.gateState.generators={};H.discoverGates() end
         if S.Pumpkins then H.pumpkinState.candidates={};H.discoverPumpkins() end
         if S.Pallets then palletCandidates={};discoverPallets() end
+        if S.Players then H.indexNPCs() end
         scan()
     end)
 end)
@@ -12979,8 +13235,8 @@ end)
 task.spawn(function()
     while not unloaded do
         task.wait(PALLET_REFRESH)
-        if not H.vaultRoundActive() then
-            -- No geometry scans or ESP allocations while waiting in lobby.
+        if S.Streamer or not H.vaultRoundActive() then
+            -- No geometry scans or ESP allocations while streaming/lobby.
             continue
         end
         if S.Pallets then
@@ -13033,6 +13289,7 @@ while not unloaded do
 task.wait(2)
 if not H.vaultRoundActive() then continue end
 for _,p in ipairs(Players:GetPlayers()) do H.updatePlayer(p) end
+H.updateNPCs()
 local old={}
 for root,r in pairs(objectFX) do
 if not root:IsDescendantOf(workspace) or not S[r.kind]
@@ -13058,7 +13315,7 @@ setMenu(true)
 -- V41 uses state / structure fallbacks for custom-prompt maps. These
 -- avoid V40's all-empty ESP, though unusable decorations with indistinguishable
 -- names/models still cannot be identified perfectly without game metadata.
-print('♡ KITTY VISION ORONA V74 LOADED ♡')
+print('♡ KITTY VISION ORONA V78 LOADED ♡')
 print('ALL TOGGLES DISABLED BY DEFAULT')
-print('RIGHT SHIFT = MENU  |  LEFT CATGIRL = CONFIGS')
+print('RIGHT SHIFT = MENU  |  RIGHT CTRL = STREAMER  |  LEFT CATGIRL = CONFIGS')
 if H.config and H.config.tryAutoload then task.defer(H.config.tryAutoload) end
