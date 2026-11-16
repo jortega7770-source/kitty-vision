@@ -1,3 +1,5 @@
+-- ORONA V79: lower Moonwalk rotation response, earlier parry approach detection,
+-- native-action-first skill checks with chat-safe fallback and faster GUI reacquisition.
 -- ORONA V78: Original integrated Streamer toggle now temporarily hides EVERY
 -- Orona ESP layer and private HUD/chat/name elements, restores settings on exit.
 -- Right Ctrl toggles Streamer Mode; Right Shift continues to open the menu.
@@ -2961,12 +2963,29 @@ end
 -- capable backends and restore chat only AFTER keyup. No double taps.
 local spaceInFlight=false
 local function sendSpace()
-    if spaceInFlight or unloaded then return false end
+    if spaceInFlight or unloaded or not S.AutoGen then return false end
+    -- Native game action first. No chat manipulation or simulated keyboard
+    -- events are necessary when the experience exposes its own controller.
+    if type(env.__OronaSkillCheckActivate)=='function' then
+        local ok,didFire=pcall(env.__OronaSkillCheckActivate)
+        if ok and didFire~=false then return true end
+    end
+    local event=PG:FindFirstChild('OronaSkillCheckAction')
+    if not event and H.repStorage then
+        event=H.repStorage:FindFirstChild('OronaSkillCheckAction')
+    end
+    if event and event:IsA('BindableFunction') then
+        local ok,result=pcall(function() return event:Invoke() end)
+        if ok and result==true then return true end
+    elseif event and event:IsA('BindableEvent') then
+        local ok=pcall(function() event:Fire() end)
+        if ok then return true end
+    end
     local focused=UIS:GetFocusedTextBox()
     local hadChat=focused~=nil and focused.Parent~=nil
     local preservedText=hadChat and focused:IsA('TextBox') and focused.Text or nil
     local function restoreChat()
-        if unloaded or not hadChat or not focused.Parent then return end
+        if unloaded or not hadChat or not focused.Parent or not robloxHasFocus then return end
         if UIS:GetFocusedTextBox()==nil then
             pcall(function()
                 if preservedText~=nil and focused.Text~=preservedText then
@@ -2976,34 +2995,18 @@ local function sendSpace()
             end)
         end
     end
-    if hadChat then
+    spaceInFlight=true
+    if hadChat and robloxHasFocus then
         pcall(function() focused:ReleaseFocus(false) end)
-    end
-    -- In your own Roblox game, let the existing skill-check LocalScript
-    -- register this callback and use its normal success-validation path.
-    -- Unlike a keyboard injection this callback also works out of focus.
-    if type(env.__OronaSkillCheckActivate)=='function' then
-        local ok,didFire=pcall(env.__OronaSkillCheckActivate)
-        if ok and didFire~=false then
-            if hadChat then task.defer(restoreChat) end
-            return true
-        end
-    end
-    local event=PG:FindFirstChild('OronaSkillCheckAction')
-    if not event and H.repStorage then
-        event=H.repStorage:FindFirstChild('OronaSkillCheckAction')
-    end
-    if event and event:IsA('BindableEvent') then
-        local ok=pcall(function() event:Fire() end)
-        if ok then
-            if hadChat then task.defer(restoreChat) end
-            return true
+        -- Let the text input controller finish releasing the keyboard.
+        RS.Heartbeat:Wait()
+        if unloaded or not S.AutoGen or UIS:GetFocusedTextBox()~=nil then
+            spaceInFlight=false
+            task.defer(restoreChat)
+            return false
         end
     end
     local pressed,release=false,nil
-    -- When Roblox loses focus, OS-level keypress targets another app.
-    -- Prefer Roblox-directed VIM even in the background; only use a raw
-    -- system key event while Roblox is the focused window.
     local function tryRobloxInput()
         local ok,vim=pcall(function()
             return game:GetService('VirtualInputManager')
@@ -3021,7 +3024,8 @@ local function sendSpace()
         end
         return success
     end
-    if not robloxHasFocus then pressed=tryRobloxInput() end
+    -- A Roblox-directed input is preferable to sending keys to the OS.
+    pressed=tryRobloxInput()
     if not pressed and robloxHasFocus
         and type(keypress)=='function' and type(keyrelease)=='function' then
         pressed=pcall(function() keypress(0x20) end)
@@ -3029,17 +3033,14 @@ local function sendSpace()
             release=function() pcall(function() keyrelease(0x20) end) end
         end
     end
-    if not pressed and robloxHasFocus then pressed=tryRobloxInput() end
     if not pressed then
+        spaceInFlight=false
         if hadChat then task.defer(restoreChat) end
         return false
     end
-    spaceInFlight=true
     task.delay(.038,function()
         if release then release() end
         spaceInFlight=false
-        -- Longer than the old 45ms focus hand-back: do not let chat
-        -- recapture Space during the skill-check's key-release frame.
         if hadChat then task.delay(.09,restoreChat) end
     end)
     return true
@@ -3118,9 +3119,10 @@ end
 local function autoFrame()
 if unloaded or not S.AutoGen then return end
 if not skillCheck or not skillCheck:IsDescendantOf(PG)
-or not needle or not goal then
+or not needle or not needle:IsDescendantOf(skillCheck)
+ or not goal or not goal:IsDescendantOf(skillCheck) then
 if os.clock()>=autoSearchAt then
-autoSearchAt=os.clock()+.25
+autoSearchAt=os.clock()+.05
 skillCheck,needle,goal=findSkillCheck()
 previousSkillAngle=nil
 previousGoal=nil
@@ -3202,9 +3204,12 @@ if skillArmed and shouldPress
 and now-lastSkillPress>.14 then
 skillArmed=false
 lastSkillPress=now
-if not sendSpace() and not lastAutoFailure then
-warn('Orona Auto Skill Check: Roblox-directed input is unavailable; out-of-focus presses require a game-side skill-check event')
-lastAutoFailure=true
+if not sendSpace() then
+    skillArmed=true
+    if not lastAutoFailure then
+        warn('Orona Auto Skill Check: input unavailable; a game-side action callback is required for reliable out-of-focus checks')
+        lastAutoFailure=true
+    end
 end
 end
 end
@@ -3246,7 +3251,7 @@ local moonHum=nil
 H.mw={
     aTime=.055, gapA=.005, dTime=.055, gapD=.005,
     bodyTurnDegrees=36, sideWeight=.65, backwardWeight=1,
-    turnResponse=55, cameraFollow=true, cameraFollowResponse=17,
+    turnResponse=46, cameraFollow=true, cameraFollowResponse=15,
     renderName='OronaMoonwalkV67',
     token=0, baseFacing=nil, lastCameraYaw=nil,
     cameraYawOffset=nil, aimWasDrivingCamera=false, startedAt=0,
@@ -3654,7 +3659,7 @@ H.parry = {
     debug=true,
     -- Add animation IDs from your own killer animations if their names are generic.
     animationIds={},
-    range=7.0, lungeRange=10.5, cooldown=0.80
+    range=7.0, lungeRange=10.5, cooldown=0.80, approachLead=0.10
 }
 
 function H.parry.weaponName(obj)
@@ -3971,7 +3976,9 @@ function H.parry.evaluate(p)
     local closing=relative:Dot(flat.Unit)
     local isLunge=attack.lunging or lunging
     local maxRange=(isLunge and closing>7) and H.parry.lungeRange or H.parry.range
-    if dist>maxRange then return end
+    -- Allow a small approach lead for a confirmed incoming swing.
+    local lead=math.clamp(math.max(0,closing)*H.parry.approachLead,0,1.25)
+    if dist>maxRange+lead then return end
     -- A held lunge isn't a swing until the release/strike is observed.
     if charging and not attack.confirmed then return end
     -- If a named attack started during a charge, wait for charge to end.
@@ -3979,7 +3986,7 @@ function H.parry.evaluate(p)
         if charging then return end
         -- The charging state ended. This is the best available client
         -- release edge when the attacker has no animation marker.
-        if not active and now-attack.started<.12 then return end
+        if not active and now-attack.started<.06 then return end
         attack.released=true
     end
     if attack.chargeStarted and charging and not attack.released then return end
@@ -4002,7 +4009,7 @@ function H.parry.step(dt)
     if not H.vaultRoundActive() then return end
     H.parry.clock+=math.min(dt,.1)
     H.parry.watchClock+=math.min(dt,.1)
-    if H.parry.watchClock>=.48 then
+    if H.parry.watchClock>=.20 then
         H.parry.watchClock=0
         for _,p in ipairs(Players:GetPlayers()) do H.parry.watch(p) end
         for p,info in pairs(H.parry.attackers) do
@@ -4014,7 +4021,7 @@ function H.parry.step(dt)
             end
         end
     end
-    if H.parry.clock<.016 then return end
+    -- Evaluate on every Heartbeat, including high-refresh clients.
     H.parry.clock=0
     if not H.parry.dagger() or menuOpen then return end
     for _,p in ipairs(Players:GetPlayers()) do
@@ -13315,7 +13322,7 @@ setMenu(true)
 -- V41 uses state / structure fallbacks for custom-prompt maps. These
 -- avoid V40's all-empty ESP, though unusable decorations with indistinguishable
 -- names/models still cannot be identified perfectly without game metadata.
-print('♡ KITTY VISION ORONA V78 LOADED ♡')
+print('♡ KITTY VISION ORONA V79 LOADED ♡')
 print('ALL TOGGLES DISABLED BY DEFAULT')
 print('RIGHT SHIFT = MENU  |  RIGHT CTRL = STREAMER  |  LEFT CATGIRL = CONFIGS')
 if H.config and H.config.tryAutoload then task.defer(H.config.tryAutoload) end
