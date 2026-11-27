@@ -1,3 +1,4 @@
+-- ORONA V82: hostile Player ESP detects zombie/infectant/servant NPCs and infected player roles; killer-pink visual color only.
 -- ORONA V81: Kitty Tools speed slider and T-toggle click teleport; slower Moonwalk turns; always-on-top Bottom vault adornment.
 -- ORONA V80: settings-aware skill-check dispatch; acknowledged game-side action required while CoreGui has focus.
 -- ORONA V79: lower Moonwalk rotation response, earlier parry approach detection,
@@ -466,6 +467,45 @@ end
 -- Prefer explicit game state, then humanoid health. A zero-health
 -- Humanoid is treated as downed, but games with separate downed
 -- attributes should use those for a reliable distinction.
+-- ESP-only hostile classification; do not change the killer predicate used by aim/parry.
+function H.hostileRoleName(value)
+    if type(value)~='string' then return nil end
+    local n=value:lower():gsub('[%s_%-]','')
+    if n:find('zombi',1,true) then return 'zombie' end
+    if n:find('infect',1,true) and not n:find('uninfect',1,true)
+        and not n:find('noninfect',1,true) and n~='infection'
+        and n~='infectionprogress' then return 'infectant' end
+    if n:find('servant',1,true) then return 'servant' end
+end
+function H.hostileEvidence(o)
+    if not o then return nil end
+    for _,key in ipairs({'IsZombie','Zombie','IsInfected','Infected',
+        'IsInfectant','Infectant','IsServant','Servant'}) do
+        if o:GetAttribute(key)==true then return H.hostileRoleName(key) end
+        local v=o:FindFirstChild(key)
+        if v and v:IsA('BoolValue') and v.Value then return H.hostileRoleName(key) end
+    end
+    for _,key in ipairs({'Role','PlayerRole','NPCType','EntityType','Type',
+        'Faction','Team','State','Status','CharacterType','MonsterType'}) do
+        local class=H.hostileRoleName(o:GetAttribute(key))
+        if class then return class end
+        local v=o:FindFirstChild(key)
+        if v and v:IsA('StringValue') then
+            class=H.hostileRoleName(v.Value)
+            if class then return class end
+        end
+    end
+    for _,tag in ipairs(CollectionService:GetTags(o)) do
+        local class=H.hostileRoleName(tag)
+        if class then return class end
+    end
+end
+function H.isHostileESP(p,char)
+    return H.isKiller(p)
+        or (p.Team and H.hostileRoleName(p.Team.Name)~=nil)
+        or H.hostileEvidence(p)~=nil
+        or H.hostileEvidence(char)~=nil
+end
 function H.survivorMood(p,char)
     if H.isKiller(p) then return 'normal' end
     for _,o in ipairs({p,char}) do
@@ -518,7 +558,7 @@ if not H.vaultRoundActive() then
     return
 end
 local char=p.Character
-local evil=H.isKiller(p)
+local evil=H.isHostileESP(p,char)
 local mood=(not evil and char) and H.survivorMood(p,char) or 'normal'
 local record=playerFX[p]
 if record and (record.char~=char or record.evil~=evil) then
@@ -598,22 +638,32 @@ function H.npcClass(model)
         or not model:IsDescendantOf(workspace)
         or Players:GetPlayerFromCharacter(model)
         or model==Me.Character then return nil end
-    local n=model.Name:lower()
-    local role=model:GetAttribute('Role') or model:GetAttribute('NPCType')
-        or model:GetAttribute('Type') or model:GetAttribute('Faction')
-    if type(role)=='string' then role=role:lower() else role='' end
-    local par=model.Parent and model.Parent.Name:lower() or ''
-    local class=nil
-    if n:find('zombie',1,true) or role:find('zombie',1,true)
-        or CollectionService:HasTag(model,'Zombie')
-        or par=='zombies' or par=='zombie' then class='zombie'
-    elseif n:find('servant',1,true) or role:find('servant',1,true)
-        or CollectionService:HasTag(model,'Servant')
-        or par=='servants' or par=='servant' then class='servant' end
-    if not class then return nil end
     local hum=model:FindFirstChildOfClass('Humanoid')
-    if not hum or hum.Health<=0 then return nil end
-    return class
+    local controller=model:FindFirstChildOfClass('AnimationController')
+    local root=model:FindFirstChild('HumanoidRootPart') or model.PrimaryPart
+        or model:FindFirstChild('Torso') or model:FindFirstChild('UpperTorso')
+    -- A rig needs a physical body and a Humanoid or AnimationController.
+    -- This avoids highlighting folders, decorations and nested accessories.
+    if not hum and not (controller and root and root:IsA('BasePart')) then return nil end
+    if hum and hum.Health<=0 then return nil end
+    if model:GetAttribute('Dead')==true or model:GetAttribute('IsDead')==true then return nil end
+    local ancestor=model.Parent
+    for _=1,5 do
+        if not ancestor or ancestor==workspace then break end
+        if ancestor:IsA('Model') and Players:GetPlayerFromCharacter(ancestor) then return nil end
+        ancestor=ancestor.Parent
+    end
+    local class=H.hostileRoleName(model.Name) or H.hostileEvidence(model)
+    if class then return class end
+    -- Generic rig names can be nested in an Infectants/Zombies/Servants container.
+    ancestor=model.Parent
+    for _=1,5 do
+        if not ancestor or ancestor==workspace then break end
+        class=H.hostileRoleName(ancestor.Name) or H.hostileEvidence(ancestor)
+        if class then return class end
+        ancestor=ancestor.Parent
+    end
+    return nil
 end
 function H.clearNPC(model)
     local effect=H.npcFX[model]
@@ -651,6 +701,8 @@ function H.updateNPCs()
             if not class then H.npcCandidates[model]=nil end
         else
             active+=1
+            effect.FillColor=C.killerPink
+            effect.OutlineColor=C.killerPink
             effect.Enabled=true
         end
     end
@@ -659,9 +711,7 @@ function H.updateNPCs()
         if not H.npcFX[model] then
             class=H.npcClass(model)
             if class then
-                local color=class=='zombie' and C.killerPink or C.light
-                H.npcFX[model]=H.addHighlight(model,color,
-                    class=='zombie' and C.hot or C.lightEdge)
+                H.npcFX[model]=H.addHighlight(model,C.killerPink,C.killerPink)
                 H.npcFX[model].Name='OronaPlayerNPCESP'
                 active+=1
             else
@@ -692,7 +742,8 @@ function H.indexNPCs()
                 if not isPlayerModel then
                     if node:IsA('Model') then H.considerNPC(node) end
                     for _,child in ipairs(node:GetChildren()) do
-                        if child:IsA('Folder') or child:IsA('Model') then
+                        if child:IsA('Folder') or child:IsA('Model') or child:IsA('WorldModel')
+                            or child:IsA('Configuration') then
                             queue[#queue+1]=child
                         end
                     end
@@ -13226,8 +13277,7 @@ end)
 H.con(workspace.DescendantAdded,function(o)
     if unloaded or not H.vaultRoundActive() then return end
     if S.Players then
-        local model=o:IsA('Model') and o
-            or (o:IsA('Humanoid') and o.Parent and o.Parent:IsA('Model') and o.Parent)
+        local model=o:IsA('Model') and o or o:FindFirstAncestorOfClass('Model')
         if model then H.considerNPC(model) end
     end
     if not (S.Hooks or S.Generators or S.Pallets or S.Vaults or S.ExitGates or S.Traps or S.Pumpkins) then return end
@@ -13451,6 +13501,10 @@ task.wait(2)
 if not H.vaultRoundActive() then continue end
 for _,p in ipairs(Players:GetPlayers()) do H.updatePlayer(p) end
 H.updateNPCs()
+-- Catch late role/tag changes and rigs assembled after their first event.
+if S.Players and not S.Streamer and os.clock()-H.npcLastIndexAt>10 then
+    H.indexNPCs()
+end
 local old={}
 for root,r in pairs(objectFX) do
 if not root:IsDescendantOf(workspace) or not S[r.kind]
