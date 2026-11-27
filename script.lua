@@ -1,3 +1,4 @@
+-- ORONA V83: configurable click-TP key, saved in configs; expanded NPC rig discovery and independent hostile billboard rendering.
 -- ORONA V82: hostile Player ESP detects zombie/infectant/servant NPCs and infected player roles; killer-pink visual color only.
 -- ORONA V81: Kitty Tools speed slider and T-toggle click teleport; slower Moonwalk turns; always-on-top Bottom vault adornment.
 -- ORONA V80: settings-aware skill-check dispatch; acknowledged game-side action required while CoreGui has focus.
@@ -629,36 +630,65 @@ end
 -- runs once when enabled, is time-budgeted, and new models arrive via events.
 -- It never touches Roblox player models or scenery without a Humanoid.
 H.npcFX = {}
+H.npcMarkers = {}
 H.npcCandidates = setmetatable({}, {__mode='k'})
 H.npcScanToken = 0
 H.npcLimit = 42 -- preserve Roblox Highlight slots for pallets and objectives
 H.npcLastIndexAt = 0
+function H.npcAnchor(model)
+    local part=model:FindFirstChild('HumanoidRootPart',true)
+        or model.PrimaryPart or model:FindFirstChild('UpperTorso',true)
+        or model:FindFirstChild('Torso',true) or model:FindFirstChild('Head',true)
+        or model:FindFirstChild('RootPart',true)
+    if part and part:IsA('BasePart') then return part end
+    return model:FindFirstChildWhichIsA('BasePart',true)
+end
 function H.npcClass(model)
-    if not model or not model:IsA('Model')
-        or not model:IsDescendantOf(workspace)
-        or Players:GetPlayerFromCharacter(model)
-        or model==Me.Character then return nil end
-    local hum=model:FindFirstChildOfClass('Humanoid')
-    local controller=model:FindFirstChildOfClass('AnimationController')
-    local root=model:FindFirstChild('HumanoidRootPart') or model.PrimaryPart
-        or model:FindFirstChild('Torso') or model:FindFirstChild('UpperTorso')
-    -- A rig needs a physical body and a Humanoid or AnimationController.
-    -- This avoids highlighting folders, decorations and nested accessories.
-    if not hum and not (controller and root and root:IsA('BasePart')) then return nil end
-    if hum and hum.Health<=0 then return nil end
-    if model:GetAttribute('Dead')==true or model:GetAttribute('IsDead')==true then return nil end
+    if not model or not model:IsA('Model') or not model:IsDescendantOf(workspace)
+        or Players:GetPlayerFromCharacter(model) or model==Me.Character then return nil end
     local ancestor=model.Parent
-    for _=1,5 do
-        if not ancestor or ancestor==workspace then break end
+    while ancestor and ancestor~=workspace do
         if ancestor:IsA('Model') and Players:GetPlayerFromCharacter(ancestor) then return nil end
         ancestor=ancestor.Parent
     end
-    local class=H.hostileRoleName(model.Name) or H.hostileEvidence(model)
+    local direct=H.hostileRoleName(model.Name) or H.hostileEvidence(model)
+    local hum=model:FindFirstChildWhichIsA('Humanoid',true)
+    local controller=model:FindFirstChildWhichIsA('AnimationController',true)
+    if hum and hum.Health<=0 then return nil end
+    if model:GetAttribute('Dead')==true or model:GetAttribute('IsDead')==true then return nil end
+    local root=H.npcAnchor(model)
+    if not root then return nil end
+    -- Accept explicitly identified custom NPCs even if they have no Humanoid.
+    -- Ignore group models containing multiple NPC rigs; track their children.
+    local nestedRigs=0
+    for _,child in ipairs(model:GetChildren()) do
+        if child:IsA('Model') and (child:FindFirstChildWhichIsA('Humanoid',true)
+            or child:FindFirstChildWhichIsA('AnimationController',true)
+            or H.hostileRoleName(child.Name)) then nestedRigs+=1 end
+    end
+    if nestedRigs>1 and not model:FindFirstChildOfClass('Humanoid') then return nil end
+    if direct and (hum or controller or model.PrimaryPart or root.Name=='HumanoidRootPart'
+        or root.Name=='Head' or root.Name=='Torso' or root.Name=='UpperTorso'
+        or model:FindFirstChildWhichIsA('BasePart')) then return direct end
+    if not hum and not controller and not (model.PrimaryPart or root.Name=='HumanoidRootPart'
+        or root.Name=='Head' or root.Name=='Torso' or root.Name=='UpperTorso') then return nil end
+    if hum then
+        local class=H.hostileRoleName(hum.DisplayName) or H.hostileEvidence(hum)
+        if class then return class end
+    end
+    local class=H.hostileEvidence(root)
     if class then return class end
-    -- Generic rig names can be nested in an Infectants/Zombies/Servants container.
+    for _,child in ipairs(model:GetChildren()) do
+        if child:IsA('Configuration') or child:IsA('Folder') or child:IsA('StringValue')
+            or child:IsA('BoolValue') then
+            class=H.hostileEvidence(child)
+            if not class and child:IsA('StringValue') then class=H.hostileRoleName(child.Value) end
+            if not class and child:IsA('BoolValue') and child.Value then class=H.hostileRoleName(child.Name) end
+            if class then return class end
+        end
+    end
     ancestor=model.Parent
-    for _=1,5 do
-        if not ancestor or ancestor==workspace then break end
+    while ancestor and ancestor~=workspace do
         class=H.hostileRoleName(ancestor.Name) or H.hostileEvidence(ancestor)
         if class then return class end
         ancestor=ancestor.Parent
@@ -668,11 +698,36 @@ end
 function H.clearNPC(model)
     local effect=H.npcFX[model]
     if effect then effect:Destroy();H.npcFX[model]=nil end
+    local marker=H.npcMarkers[model]
+    if marker then marker:Destroy();H.npcMarkers[model]=nil end
+end
+function H.ensureNPCMarker(model,class)
+    local anchor=H.npcAnchor(model)
+    if not anchor then return end
+    local marker=H.npcMarkers[model]
+    if not marker or not marker.Parent then
+        marker=H.new('BillboardGui',{
+            Name='OronaHostileNPCMarker',Adornee=anchor,AlwaysOnTop=true,
+            Size=UDim2.fromOffset(108,30),StudsOffsetWorldSpace=Vector3.new(0,3.6,0),
+            MaxDistance=0,LightInfluence=0,Enabled=true
+        },PG)
+        local label=H.label(marker,class:upper(),15,C.killerPink,
+            UDim2.fromScale(0,0),UDim2.fromScale(1,1))
+        label.Name='HostileLabel'
+        label.TextStrokeColor3=C.white
+        label.TextStrokeTransparency=.12
+        H.npcMarkers[model]=marker
+    end
+    marker.Adornee=anchor
+    marker.Enabled=true
+    local label=marker:FindFirstChild('HostileLabel')
+    if label then label.Text=class:upper() end
 end
 function H.clearAllNPCs()
     for model in pairs(H.npcFX) do H.clearNPC(model) end
     H.npcCandidates=setmetatable({}, {__mode='k'})
     H.npcScanToken+=1
+    H.npcIndexRunning=nil
 end
 function H.considerNPC(model)
     if unloaded or S.Streamer or not S.Players or not H.vaultRoundActive() then return end
@@ -704,6 +759,7 @@ function H.updateNPCs()
             effect.FillColor=C.killerPink
             effect.OutlineColor=C.killerPink
             effect.Enabled=true
+            H.ensureNPCMarker(model,class)
         end
     end
     for model,class in pairs(H.npcCandidates) do
@@ -713,6 +769,7 @@ function H.updateNPCs()
             if class then
                 H.npcFX[model]=H.addHighlight(model,C.killerPink,C.killerPink)
                 H.npcFX[model].Name='OronaPlayerNPCESP'
+                H.ensureNPCMarker(model,class)
                 active+=1
             else
                 H.npcCandidates[model]=nil
@@ -722,8 +779,10 @@ function H.updateNPCs()
 end
 function H.indexNPCs()
     if unloaded or S.Streamer or not S.Players or not H.vaultRoundActive() then return end
+    if H.npcIndexRunning then return end
     H.npcScanToken+=1
     local token=H.npcScanToken
+    H.npcIndexRunning=token
     H.npcLastIndexAt=os.clock()
     task.spawn(function()
         local queue={workspace}
@@ -742,8 +801,8 @@ function H.indexNPCs()
                 if not isPlayerModel then
                     if node:IsA('Model') then H.considerNPC(node) end
                     for _,child in ipairs(node:GetChildren()) do
-                        if child:IsA('Folder') or child:IsA('Model') or child:IsA('WorldModel')
-                            or child:IsA('Configuration') then
+                        -- Traverse all containers, including custom rigs nested under parts.
+                        if #child:GetChildren()>0 or child:IsA('Model') then
                             queue[#queue+1]=child
                         end
                     end
@@ -751,6 +810,7 @@ function H.indexNPCs()
             end
             task.wait()
         end
+        if H.npcIndexRunning==token then H.npcIndexRunning=nil end
         if token==H.npcScanToken then H.updateNPCs() end
     end)
 end
@@ -11167,7 +11227,7 @@ toggleRow(430,"♡ Gun Aimlock","GunAimlock",sidePanel)
 -- V81 movement tools. Scoped to H to avoid increasing top-level local count.
 do
     local m={speed=16,speedEnabled=false,tpEnabled=false,tpKey=Enum.KeyCode.T,
-        dragging=false,humanoid=nil,original=nil,lastWritten=nil}
+        choosingTPKey=false,dragging=false,humanoid=nil,original=nil,lastWritten=nil}
     H.movement=m
     local function restoreSpeed()
         local hum=m.humanoid
@@ -11200,15 +11260,37 @@ do
         end
     end
     local tp=H.new('TextButton',{
-        Size=UDim2.new(1,-30,0,29),Position=UDim2.fromOffset(15,462),
+        Size=UDim2.new(1,-122,0,29),Position=UDim2.fromOffset(15,462),
         BackgroundColor3=C.cream,BorderSizePixel=0,TextColor3=C.dark,
         Font=Enum.Font.GothamBold,TextSize=12,AutoButtonColor=false,ZIndex=25
     },sidePanel)
     H.round(tp,10);H.stroke(tp,C.pink,1)
+    local keyButton=H.new('TextButton',{
+        Size=UDim2.fromOffset(86,29),Position=UDim2.new(1,-101,0,462),
+        BackgroundColor3=C.pale,BorderSizePixel=0,TextColor3=C.dark,
+        Font=Enum.Font.GothamBold,TextSize=11,AutoButtonColor=false,ZIndex=26
+    },sidePanel)
+    H.round(keyButton,10);H.stroke(keyButton,C.pink,1)
     local function updateTP()
-        tp.Text='Click Teleport [T]  •  '..(m.tpEnabled and 'ON' or 'OFF')
+        tp.Text='Click Teleport  •  '..(m.tpEnabled and 'ON' or 'OFF')
         tp.BackgroundColor3=m.tpEnabled and C.soft or C.cream
+        keyButton.Text=m.choosingTPKey and 'Press key...' or ('Key: '..(m.tpKey and m.tpKey.Name or 'None'))
     end
+    m.updateTP=updateTP
+    m.cancelBinding=function()
+        m.choosingTPKey=false
+        updateTP()
+    end
+    m.validTPKey=function(key)
+        return key and key~=Enum.KeyCode.Unknown and key~=Enum.KeyCode.Escape
+            and key~=Enum.KeyCode.RightShift and key~=Enum.KeyCode.RightControl
+            and key~=moonKey
+    end
+    H.con(keyButton.MouseButton1Click,function()
+        if unloaded or choosingMoonKey then return end
+        m.choosingTPKey=not m.choosingTPKey
+        updateTP()
+    end)
     local function toggleTP()
         if unloaded then return end
         m.tpEnabled=not m.tpEnabled
@@ -11281,9 +11363,18 @@ do
     end)
     H.con(RS.Heartbeat,applySpeed)
     H.con(UIS.InputBegan,function(input,processed)
-        if unloaded or processed or choosingMoonKey or UIS:GetFocusedTextBox()
+        if unloaded then return end
+        if m.choosingTPKey then
+            if input.KeyCode==Enum.KeyCode.Escape then m.cancelBinding()
+            elseif input.UserInputType==Enum.UserInputType.Keyboard and m.validTPKey(input.KeyCode) then
+                m.tpKey=input.KeyCode
+                m.cancelBinding()
+            end
+            return
+        end
+        if processed or choosingMoonKey or UIS:GetFocusedTextBox()
             or game:GetService('GuiService').MenuIsOpen then return end
-        if input.KeyCode==m.tpKey and not menuOpen then
+        if m.validTPKey(m.tpKey) and input.KeyCode==m.tpKey and not menuOpen then
             toggleTP()
             return
         end
@@ -11329,6 +11420,7 @@ local bindButton=H.new('TextButton',{
 },bindRow)
 H.round(bindButton,10)
 H.con(bindButton.MouseButton1Click,function()
+    if H.movement then H.movement.cancelBinding() end
     choosingMoonKey=true
     finishMoonwalk()
     bindButton.Text='Press key/mouse...'
@@ -12129,6 +12221,7 @@ do
         return {
             version=1,switches=switches,
             moonKey=moonKey and tostring(moonKey) or 'Unbound',
+            tpKey=H.movement.tpKey and H.movement.tpKey.Name or nil,
             fov=H.chosenFOV,fovCustomized=H.fovCustomized,
             moon={bodyTurnDegrees=H.mw.bodyTurnDegrees,
                 sideWeight=H.mw.sideWeight,backwardWeight=H.mw.backwardWeight,
@@ -12159,6 +12252,13 @@ do
             end
             local t=moonKey and (moonKey==Enum.UserInputType.MouseButton3 and 'Mouse 3' or moonKey.Name) or 'Unbound'
             bindButton.Text=t
+        end
+        if type(data.tpKey)=='string' then
+            local ok,key=pcall(function() return Enum.KeyCode[data.tpKey] end)
+            if ok and H.movement.validTPKey(key) then
+                H.movement.tpKey=key
+                H.movement.updateTP()
+            end
         end
         if type(data.moon)=='table' then
             local m=data.moon
@@ -13073,7 +13173,7 @@ end
 local menuActionName='OronaMenuActionV48'
 local lastMenuPress=-100
 local function requestMenuToggle()
-    if unloaded or choosingMoonKey or UIS:GetFocusedTextBox() then return end
+    if unloaded or choosingMoonKey or (H.movement and H.movement.choosingTPKey) or UIS:GetFocusedTextBox() then return end
     local now=os.clock()
     if now-lastMenuPress<.2 then return end
     lastMenuPress=now
@@ -13162,7 +13262,7 @@ local function keyDisplay(key)
     return names[key] or key.Name
 end
 H.con(UIS.InputBegan,function(input,processed)
-    if unloaded then return end
+    if unloaded or (H.movement and H.movement.choosingTPKey) then return end
     if choosingMoonKey then
         if input.KeyCode==Enum.KeyCode.Escape then
             choosingMoonKey=false
@@ -13502,7 +13602,7 @@ if not H.vaultRoundActive() then continue end
 for _,p in ipairs(Players:GetPlayers()) do H.updatePlayer(p) end
 H.updateNPCs()
 -- Catch late role/tag changes and rigs assembled after their first event.
-if S.Players and not S.Streamer and os.clock()-H.npcLastIndexAt>10 then
+if S.Players and not S.Streamer and os.clock()-H.npcLastIndexAt>6 then
     H.indexNPCs()
 end
 local old={}
