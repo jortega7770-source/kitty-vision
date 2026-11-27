@@ -1,3 +1,4 @@
+-- ORONA V80: settings-aware skill-check dispatch; acknowledged game-side action required while CoreGui has focus.
 -- ORONA V79: lower Moonwalk rotation response, earlier parry approach detection,
 -- native-action-first skill checks with chat-safe fallback and faster GUI reacquisition.
 -- ORONA V78: Original integrated Streamer toggle now temporarily hides EVERY
@@ -2964,11 +2965,13 @@ end
 local spaceInFlight=false
 local function sendSpace()
     if spaceInFlight or unloaded or not S.AutoGen then return false end
-    -- Native game action first. No chat manipulation or simulated keyboard
-    -- events are necessary when the experience exposes its own controller.
+    -- Native game action first. The Escape menu owns keyboard focus, so a
+    -- successful simulated key call is not proof the skill check was submitted.
+    local guiService=game:GetService('GuiService')
+    local menuBlocked=guiService.MenuIsOpen
     if type(env.__OronaSkillCheckActivate)=='function' then
         local ok,didFire=pcall(env.__OronaSkillCheckActivate)
-        if ok and didFire~=false then return true end
+        if ok and didFire==true then return true end
     end
     local event=PG:FindFirstChild('OronaSkillCheckAction')
     if not event and H.repStorage then
@@ -2977,10 +2980,13 @@ local function sendSpace()
     if event and event:IsA('BindableFunction') then
         local ok,result=pcall(function() return event:Invoke() end)
         if ok and result==true then return true end
-    elseif event and event:IsA('BindableEvent') then
+    elseif event and event:IsA('BindableEvent') and not menuBlocked then
         local ok=pcall(function() event:Fire() end)
         if ok then return true end
     end
+    -- When CoreGui owns keyboard focus, only an acknowledged game-side action
+    -- can reliably submit the check. Do not inject Space into Roblox Settings.
+    if menuBlocked then return false end
     local focused=UIS:GetFocusedTextBox()
     local hadChat=focused~=nil and focused.Parent~=nil
     local preservedText=hadChat and focused:IsA('TextBox') and focused.Text or nil
@@ -3207,7 +3213,7 @@ lastSkillPress=now
 if not sendSpace() then
     skillArmed=true
     if not lastAutoFailure then
-        warn('Orona Auto Skill Check: input unavailable; a game-side action callback is required for reliable out-of-focus checks')
+        warn('Orona Auto Skill Check: input unavailable; connect the game-owned OronaSkillCheckAction BindableFunction (returns true when submitted) for Settings or out-of-focus checks')
         lastAutoFailure=true
     end
 end
