@@ -1,3 +1,4 @@
+-- ORONA V81: Kitty Tools speed slider and T-toggle click teleport; slower Moonwalk turns; always-on-top Bottom vault adornment.
 -- ORONA V80: settings-aware skill-check dispatch; acknowledged game-side action required while CoreGui has focus.
 -- ORONA V79: lower Moonwalk rotation response, earlier parry approach detection,
 -- native-action-first skill checks with chat-safe fallback and faster GUI reacquisition.
@@ -1716,20 +1717,19 @@ end
 function H.createWindowMarker(root,part)
     local marker=H.new('BillboardGui',{
         Name='OronaCuteVaultESP',Adornee=part,AlwaysOnTop=true,
-        Size=UDim2.fromOffset(82,24),
+        Size=UDim2.fromOffset(104,28),
         StudsOffsetWorldSpace=Vector3.new(0,math.max(.7,part.Size.Y*.5+.25),0),
         MaxDistance=0,LightInfluence=0,Enabled=true
     },PG)
-    local outline=H.new('SelectionBox',{
+    local outline=H.new('BoxHandleAdornment',{
         Name='BottomOnlyOutline',Adornee=part,
-        Color3=C.hot,Transparency=.06,
-        LineThickness=.055,SurfaceColor3=C.pink,
-        SurfaceTransparency=.89,Visible=true
+        Color3=C.hot,Transparency=.32,
+        Size=part.Size+Vector3.new(.08,.08,.08),
+        AlwaysOnTop=true,ZIndex=5,Visible=true
     },part)
-    pcall(function() outline.AlwaysOnTop=true end)
     H.vaultState.outlines=H.vaultState.outlines or {}
     H.vaultState.outlines[root]=outline
-    local tag=H.label(marker,'♡ VAULT ♡',12,C.hot,
+    local tag=H.label(marker,'♡ VAULT ♡',15,C.hot,
         UDim2.fromOffset(0,0),UDim2.fromScale(1,1))
     tag.ZIndex=6
     tag.TextStrokeColor3=C.white
@@ -1891,6 +1891,7 @@ function H.updateVaults()
             if outline then
                 outline.Adornee=target
                 if outline.Parent~=target then outline.Parent=target end
+                outline.Size=target.Size+Vector3.new(.08,.08,.08)
                 outline.Visible=true
             end
         end
@@ -3255,9 +3256,9 @@ local moonHeld=false
 local aimHeld=false
 local moonHum=nil
 H.mw={
-    aTime=.055, gapA=.005, dTime=.055, gapD=.005,
+    aTime=.085, gapA=.008, dTime=.085, gapD=.008,
     bodyTurnDegrees=36, sideWeight=.65, backwardWeight=1,
-    turnResponse=46, cameraFollow=true, cameraFollowResponse=15,
+    turnResponse=20, cameraFollow=true, cameraFollowResponse=10,
     renderName='OronaMoonwalkV67',
     token=0, baseFacing=nil, lastCameraYaw=nil,
     cameraYawOffset=nil, aimWasDrivingCamera=false, startedAt=0,
@@ -3347,7 +3348,7 @@ local function finishMoonwalk()
         if H.mw.originalAutoRotate~=nil then
             moonHum.AutoRotate=H.mw.originalAutoRotate
         end
-        if H.mw.speedChanged and H.mw.sprintTarget and H.mw.startingSpeed
+        if not (H.movement and H.movement.speedEnabled) and H.mw.speedChanged and H.mw.sprintTarget and H.mw.startingSpeed
            and math.abs(moonHum.WalkSpeed-H.mw.sprintTarget)<.2
            and not UIS:IsKeyDown(Enum.KeyCode.LeftShift) then
             moonHum.WalkSpeed=H.mw.startingSpeed
@@ -4194,7 +4195,7 @@ function H.mwUpdate(dt)
     -- Maintain only the *previously observed* normal sprint speed if the
     -- game drops back to walking when physical Shift is released.
     local speed=H.mw.sprintTarget
-    if speed and speed>0 and hum.WalkSpeed<speed-.15 then
+    if not (H.movement and H.movement.speedEnabled) and speed and speed>0 and hum.WalkSpeed<speed-.15 then
         hum.WalkSpeed=speed
         H.mw.speedChanged=true
     end
@@ -11112,6 +11113,152 @@ H.new('Frame',{Size=UDim2.fromOffset(242,1),Position=UDim2.fromOffset(43,385),
     BackgroundColor3=C.soft,BorderSizePixel=0,ZIndex=21},sidePanel)
 toggleRow(395,"♡ Flashlight Aimlock","Aimlock",sidePanel)
 toggleRow(430,"♡ Gun Aimlock","GunAimlock",sidePanel)
+-- V81 movement tools. Scoped to H to avoid increasing top-level local count.
+do
+    local m={speed=16,speedEnabled=false,tpEnabled=false,tpKey=Enum.KeyCode.T,
+        dragging=false,humanoid=nil,original=nil,lastWritten=nil}
+    H.movement=m
+    local function restoreSpeed()
+        local hum=m.humanoid
+        if hum and hum.Parent and m.original~=nil and m.lastWritten~=nil
+            and math.abs(hum.WalkSpeed-m.lastWritten)<.05 then
+            hum.WalkSpeed=m.original
+        end
+        m.humanoid=nil
+        m.original=nil
+        m.lastWritten=nil
+    end
+    m.restoreSpeed=restoreSpeed
+    local function applySpeed()
+        if unloaded or not m.speedEnabled then return end
+        local char=Me.Character
+        local hum=char and char:FindFirstChildOfClass('Humanoid')
+        if hum~=m.humanoid then
+            restoreSpeed()
+            if hum and hum.Health>0 then
+                m.humanoid=hum
+                m.original=hum.WalkSpeed
+            end
+        end
+        if hum and hum.Health>0 then
+            if m.lastWritten~=nil and math.abs(hum.WalkSpeed-m.lastWritten)>.05 then
+                m.original=hum.WalkSpeed
+            end
+            if math.abs(hum.WalkSpeed-m.speed)>.05 then hum.WalkSpeed=m.speed end
+            m.lastWritten=m.speed
+        end
+    end
+    local tp=H.new('TextButton',{
+        Size=UDim2.new(1,-30,0,29),Position=UDim2.fromOffset(15,462),
+        BackgroundColor3=C.cream,BorderSizePixel=0,TextColor3=C.dark,
+        Font=Enum.Font.GothamBold,TextSize=12,AutoButtonColor=false,ZIndex=25
+    },sidePanel)
+    H.round(tp,10);H.stroke(tp,C.pink,1)
+    local function updateTP()
+        tp.Text='Click Teleport [T]  •  '..(m.tpEnabled and 'ON' or 'OFF')
+        tp.BackgroundColor3=m.tpEnabled and C.soft or C.cream
+    end
+    local function toggleTP()
+        if unloaded then return end
+        m.tpEnabled=not m.tpEnabled
+        updateTP()
+    end
+    H.con(tp.MouseButton1Click,toggleTP)
+    updateTP()
+    local speedRow=H.new('Frame',{
+        Size=UDim2.new(1,-30,0,49),Position=UDim2.fromOffset(15,494),
+        BackgroundColor3=C.cream,BorderSizePixel=0,ZIndex=25
+    },sidePanel)
+    H.round(speedRow,10);H.stroke(speedRow,C.pink,1)
+    local value=H.label(speedRow,'WalkSpeed: 16',12,C.dark,
+        UDim2.fromOffset(10,1),UDim2.new(1,-87,0,22))
+    value.TextXAlignment=Enum.TextXAlignment.Left;value.ZIndex=26
+    local power=H.new('TextButton',{
+        Size=UDim2.fromOffset(58,21),Position=UDim2.new(1,-65,0,2),
+        BackgroundColor3=C.pale,Text='OFF',TextColor3=C.dark,
+        Font=Enum.Font.GothamBold,TextSize=11,AutoButtonColor=false,ZIndex=27
+    },speedRow)
+    H.round(power,8)
+    local track=H.new('Frame',{
+        Position=UDim2.fromOffset(14,31),Size=UDim2.new(1,-28,0,9),
+        BackgroundColor3=C.soft,BorderSizePixel=0,Active=true,ZIndex=26
+    },speedRow)
+    H.round(track,5)
+    local fill=H.new('Frame',{Size=UDim2.fromScale(0,1),
+        BackgroundColor3=C.hot,BorderSizePixel=0,ZIndex=27},track)
+    H.round(fill,5)
+    local knob=H.new('Frame',{Size=UDim2.fromOffset(17,17),
+        AnchorPoint=Vector2.new(.5,.5),BackgroundColor3=C.white,
+        BorderSizePixel=0,Active=true,ZIndex=28},track)
+    H.round(knob,10);H.stroke(knob,C.hot,1.5)
+    local function updateSpeed()
+        local pct=(m.speed-8)/92
+        fill.Size=UDim2.fromScale(pct,1)
+        knob.Position=UDim2.fromScale(pct,.5)
+        value.Text='WalkSpeed: '..m.speed
+        power.Text=m.speedEnabled and 'ON' or 'OFF'
+        power.BackgroundColor3=m.speedEnabled and C.soft or C.pale
+    end
+    local function setSpeed(x)
+        if unloaded or track.AbsoluteSize.X<=0 then return end
+        m.speed=math.floor(8+92*math.clamp((x-track.AbsolutePosition.X)/track.AbsoluteSize.X,0,1)+.5)
+        updateSpeed()
+        applySpeed()
+    end
+    local function startDrag(input)
+        if input.UserInputType~=Enum.UserInputType.MouseButton1 then return end
+        m.dragging=true
+        setSpeed(input.Position.X)
+    end
+    H.con(track.InputBegan,startDrag)
+    H.con(knob.InputBegan,startDrag)
+    H.con(UIS.InputChanged,function(input)
+        if m.dragging and menuOpen and sidePanel.Visible and
+            input.UserInputType==Enum.UserInputType.MouseMovement then
+            setSpeed(input.Position.X)
+        end
+    end)
+    H.con(UIS.InputEnded,function(input)
+        if input.UserInputType==Enum.UserInputType.MouseButton1 then m.dragging=false end
+    end)
+    H.con(UIS.WindowFocusReleased,function() m.dragging=false end)
+    H.con(power.MouseButton1Click,function()
+        if unloaded then return end
+        m.speedEnabled=not m.speedEnabled
+        if m.speedEnabled then applySpeed() else restoreSpeed() end
+        updateSpeed()
+    end)
+    H.con(RS.Heartbeat,applySpeed)
+    H.con(UIS.InputBegan,function(input,processed)
+        if unloaded or processed or choosingMoonKey or UIS:GetFocusedTextBox()
+            or game:GetService('GuiService').MenuIsOpen then return end
+        if input.KeyCode==m.tpKey and not menuOpen then
+            toggleTP()
+            return
+        end
+        if not m.tpEnabled or menuOpen or input.UserInputType~=Enum.UserInputType.MouseButton1 then return end
+        local char=Me.Character
+        local hum=char and char:FindFirstChildOfClass('Humanoid')
+        local root=char and char:FindFirstChild('HumanoidRootPart')
+        local camera=workspace.CurrentCamera
+        if not hum or hum.Health<=0 or not root or not camera then return end
+        local mouse=Me:GetMouse()
+        if not mouse.Target then return end
+        local direction=mouse.Hit.Position-camera.CFrame.Position
+        if direction.Magnitude<.01 then return end
+        local params=RaycastParams.new()
+        params.FilterType=Enum.RaycastFilterType.Exclude
+        params.FilterDescendantsInstances={char}
+        local hit=workspace:Raycast(camera.CFrame.Position,direction.Unit*(direction.Magnitude+2),params)
+        if not hit then return end
+        local lift=math.max(3,hum.HipHeight+root.Size.Y*.5+.25)
+        local dest=hit.Position+Vector3.new(0,lift,0)+hit.Normal*.3
+        char:PivotTo(CFrame.new(dest)*(char:GetPivot()-char:GetPivot().Position))
+        root.AssemblyLinearVelocity=Vector3.zero
+        root.AssemblyAngularVelocity=Vector3.zero
+    end)
+    updateSpeed()
+end
 -- Choose moonwalk key without editing the script.
 -- Choose moonwalk key without editing the script.
 local bindRow=H.new('Frame',{
@@ -12919,6 +13066,7 @@ CAS:UnbindAction(menuActionName)
 unloaded=true
 enabled=false
 finishMoonwalk()
+if H.movement then H.movement.restoreSpeed() end
 RS:UnbindFromRenderStep(motionRenderName)
 RS:UnbindFromRenderStep(H.mw.renderName)
 H.stopFovOverride()
